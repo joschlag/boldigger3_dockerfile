@@ -20,7 +20,7 @@ jobs:
           id: build-docker-image-boldigger3
           run: |
             ls -la 
-            docker build . -f Dockerfile -t joschlag/boldigger3:1.4.4
+            docker build . -f Dockerfile -t joschlag/boldigger3:1.4.7
         - name: push the docker image
           id: push-docker-image-boldigger3
-          run: docker push ${{secrets.DOCKERHUB_USERNAME}}/boldigger3:1.4.4
+          run: docker push ${{secrets.DOCKERHUB_USERNAME}}/boldigger3:1.4.7
