@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright/python:v1.51.0-noble
+FROM mcr.microsoft.com/playwright/python:v1.49.1-noble
 
 RUN apt update && \
 	apt upgrade -y && \
