@@ -23,4 +23,4 @@ RUN git clone https://github.com/DominikBuchner/BOLDigger3.git
 
 WORKDIR /home/BOLDigger3
 
-RUN python setup.py install
+RUN pip install .
