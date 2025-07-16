@@ -4,7 +4,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
-    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    ENV PLAYWRIGHT_DISABLE_SUDO=true
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
