@@ -15,8 +15,7 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip install --upgrade pip && \
-    pip install packaging tables httpx
+RUN pip install --upgrade pip setuptools packaging tables httpx
 
 WORKDIR /home
 
