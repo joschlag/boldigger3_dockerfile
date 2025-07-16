@@ -17,6 +17,8 @@ RUN apt-get update && \
 
 RUN pip install --upgrade pip setuptools packaging tables httpx
 
+RUN playwright install --with-deps
+
 WORKDIR /home
 
 RUN git clone https://github.com/DominikBuchner/BOLDigger3.git
