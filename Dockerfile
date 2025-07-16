@@ -3,7 +3,7 @@ FROM mcr.microsoft.com/playwright/python:v1.53.0
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 RUN apt-get update && \
