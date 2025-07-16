@@ -1,16 +1,27 @@
-FROM mcr.microsoft.com/playwright/python:v1.52.0
+FROM mcr.microsoft.com/playwright/python:v1.53.0
 
-RUN apt update && \
-	apt upgrade -y && \
-	apt install -y build-essential wget zlib1g zlib1g-dev python3 pip && \
-	apt clean
- 
-RUN apt-get install -y git
-RUN apt-get install -y libhdf5-serial-dev
-RUN pip install packaging tables httpx
-RUN cd /home && \
-	git clone https://github.com/DominikBuchner/BOLDigger3.git
- 
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    build-essential \
+    wget \
+    git \
+    zlib1g-dev \
+    libhdf5-serial-dev \
+    sudo && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN pip install --upgrade pip && \
+    pip install packaging tables httpx
+
+WORKDIR /home
+
+RUN git clone https://github.com/DominikBuchner/BOLDigger3.git
+
 WORKDIR /home/BOLDigger3
-RUN python3 setup.py install
-RUN apt install -y sudo
+
+RUN python setup.py install
