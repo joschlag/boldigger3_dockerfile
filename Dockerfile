@@ -22,4 +22,4 @@ RUN mkdir -p /data && cp -r /usr/local/lib/python3.11/site-packages/boldigger3 /
 
 WORKDIR /data
 
-CMD ["python", "-m", "boldigger3"]
+CMD ["python", "boldigger3/__main__.py"]
