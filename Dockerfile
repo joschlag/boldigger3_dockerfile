@@ -1,30 +1,19 @@
-FROM mcr.microsoft.com/playwright/python:v1.53.0
+FROM python:3.11-slim
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
-    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
-    PLAYWRIGHT_DISABLE_SUDO=true
+ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    build-essential \
-    git \
-    zlib1g-dev \
-    libhdf5-serial-dev \
-    sudo && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libffi-dev \
+    libssl-dev \
+    libsqlite3-dev \
+    && pip install --upgrade pip \
+    && pip install boldigger3==2.0.0 \
+    && apt-get remove -y gcc \
+    && apt-get autoremove -y \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --upgrade pip setuptools packaging tables httpx
+WORKDIR /app
 
-WORKDIR /home
-
-RUN git clone https://github.com/DominikBuchner/BOLDigger3.git
-
-WORKDIR /home/BOLDigger3
-
-RUN pip install .
-
-RUN playwright install --with-deps
+CMD ["boldigger3"]
