@@ -17,6 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# Set a writable directory (Singularity will bind-mount over this)
+RUN mkdir -p /data && cp -r /usr/local/lib/python3.11/site-packages/boldigger3 /data/boldigger3
 
-CMD ["boldigger3"]
+WORKDIR /data
+
+CMD ["python", "-m", "boldigger3"]
