@@ -5,6 +5,7 @@ from dateutil.parser import parse
 from tqdm import tqdm
 import urllib.request
 import duckdb, tarfile, json
+import datetime
 
 # only select these columns from tsv
 # SELECTED_COLUMNS was left outside and on the top as global variable so that incase you need to access it from some other
@@ -283,23 +284,26 @@ def database_to_duckdb(output_path: str, package_date: str, database_path: Path)
         raise e
 
 
-def main(db_dir: str = "/tmp/boldigger3_db"):
-    """Main function to trigger the addition data download."""
+def main(db_dir: Path = None):
+    """Main function to trigger the additional data download."""
+    
+    if db_dir is None:
+        db_dir = Path.cwd() / "data" / "boldigger3_db"
+        
     # give user output
     print(f"{datetime.datetime.now():%H:%M:%S}: Welcome to BOLDigger3.")
     print(f"{datetime.datetime.now():%H:%M:%S}: Checking data package availability.")
     
     # check if a new download and duck db parsing is needed
-    database_path = Path(db_dir)
-    database_path.mkdir(parents=True, exist_ok=True)
+    db_dir.mkdir(parents=True, exist_ok=True)
 
-    downloaded_needed, url, output_path, package_date = check_database(database_path)
+    # Check if new data is needed
+    downloaded_needed, url, output_path, package_date = check_database(db_dir)
     # downloaded_needed, url, output_path, package_date = check_database()
 
-    # if the download is needed, download and stream to duckdb
     if downloaded_needed:
         download_url(url, output_path)
         print(
             f"{datetime.datetime.now():%H:%M:%S}: Compiling downloaded data stored at {output_path}, this will take a while."
         )
-        database_to_duckdb(output_path, package_date, database_path)
+        database_to_duckdb(output_path, package_date, db_dir)
