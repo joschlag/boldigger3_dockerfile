@@ -1,4 +1,5 @@
 import argparse, sys, datetime, luddite, duckdb
+from pathlib import Path
 from boldigger3 import id_engine
 from boldigger3 import metadata_download
 from boldigger3 import add_metadata
@@ -62,6 +63,14 @@ def main() -> None:
         type=int,
         help="Thresholds to use for the selection of the top hit.",
     )
+    
+    parser_identify.add_argument(
+        "--db-dir",
+        type=str,
+        default=None,
+        help="Custom path to store the boldigger3 database."
+    )
+
 
     # add version control
     # get the installed version
@@ -112,8 +121,13 @@ def main() -> None:
 
     # run the identification engine
     if arguments.function == "identify":
+
+        # Resolve db path
+        db_dir = Path(arguments.db_dir) if arguments.db_dir else Path.cwd() / "data" / "boldigger3_db"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        
         # download the current metadata from BOLD
-        metadata_download.main(db_dir="/data/boldigger3_db")  # or another writable path
+        metadata_download.main(db_dir=db_dir)  # or another writable path
 
         # run the id engine
         id_engine.main(
