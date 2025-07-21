@@ -36,6 +36,7 @@ WORKDIR /data
 # Make sure these are in the same GitHub repo where the Dockerfile lives
 COPY modifications/metadata_download.py /usr/local/lib/python3.11/site-packages/boldigger3/metadata_download.py
 COPY modifications/__main__.py /usr/local/lib/python3.11/site-packages/boldigger3/__main__.py
+COPY modifications/add_metadata.py /usr/local/lib/python3.11/site-packages/boldigger3/add_metadata.py
 
 #COPY modifications/metadata_download.py /tmp/
 #COPY modifications/__main__.py /tmp/
