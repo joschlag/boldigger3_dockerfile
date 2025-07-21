@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxml2-dev \
     libxslt1-dev \
     && pip install --upgrade pip \
-    && pip install boldigger3==2.0.0 \
+    && pip install boldigger3==2.0.1 \
     && pip install "lxml[html_clean]" \
     && apt-get remove -y gcc \
     && apt-get autoremove -y \
