@@ -18,11 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #    libxslt1-dev \
 #    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install BOLDigger3
-RUN pip install boldigger3==2.0.1
-# RUN pip install --upgrade pip \
-#    && pip install boldigger3==2.0.0 \
-#    && pip install "lxml[html_clean]"
+
+ RUN pip install --upgrade pip \
+    && pip install boldigger3==2.0.1 \
+    && pip install "lxml[html_clean]"
 
 #RUN mkdir -p /data
 #WORKDIR /data
