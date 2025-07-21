@@ -80,7 +80,7 @@ def parse_column_types_from_metadata(metadata: object) -> dict:
 
 
 def get_version_file_path(database_path: Path) -> Path:
-    return database_path.joinpath("version.txt")
+    return database_path / "version.txt"
 
 # def get_version_file_path() -> object:
     # """Function that returns the versioning file path.
@@ -94,6 +94,11 @@ def get_version_file_path(database_path: Path) -> Path:
 
 def is_version_fresh(package_date: str, database_path: Path) -> bool:
     version_path = get_version_file_path(database_path)
+    if not version_path.exists():
+        return False
+    with open(version_path) as f:
+        last_date = f.read().strip()
+    return last_date == package_date
 
 # def is_version_fresh(package_date: str) -> bool:
 #     """Function to check if the database is up to date.
@@ -153,13 +158,19 @@ def check_database(database_path: Path) -> tuple:
         package_date = parse(package_id.split(".")[-1])
         package_date = package_date.strftime("%Y-%m-%d")
         # generate an output path for the download and a duck db path for the duckdb database
-        database_name = f"database_snapshot_{package_date}.tar.gz"
-        output_path = database_path.joinpath(database_name)
+        #database_name = f"database_snapshot_{package_date}.tar.gz"
+        #output_path = database_path.joinpath(database_name)
+        #duckdb_name = f"database_snapshot_{package_date}.duckdb"
+        #duckdb_path = database_path.joinpath(duckdb_name)
+
+        archive_name = f"database_snapshot_{package_date}.tar.gz"
         duckdb_name = f"database_snapshot_{package_date}.duckdb"
-        duckdb_path = database_path.joinpath(duckdb_name)
+
+        output_path = database_path / archive_name
+        duckdb_path = database_path / duckdb_name
 
         # if the duck db database exists and the version file can be read and is up to date, nothing is to do
-        if duckdb_path.is_file() and is_version_fresh(package_date, database_path):
+        if duckdb_path.exists() and is_version_fresh(package_date, database_path):
             print(f"{datetime.datetime.now():%H:%M:%S}: Database is up to date.")
             return False, "", output_path, package_date
         # triggers the download
@@ -178,7 +189,7 @@ def check_database(database_path: Path) -> tuple:
             return True, download_url, output_path, package_date
 
 
-def download_url(url: str, output_path: str):
+def download_url(url: str, output_path: Path):
     """Function to download from a url and display a progressbar
 
     Args:
@@ -191,7 +202,7 @@ def download_url(url: str, output_path: str):
         urllib.request.urlretrieve(url, filename=output_path, reporthook=t.update_to)
 
 
-def database_to_duckdb(output_path: str, package_date: str, database_path: Path):
+def database_to_duckdb(output_path: Path, package_date: str, database_path: Path):
     """Function to extract the downloaded tar.gz and stream it into duckdb
 
     Args:
@@ -203,7 +214,7 @@ def database_to_duckdb(output_path: str, package_date: str, database_path: Path)
     """
     db_path = str(output_path).replace(".tar.gz", ".duckdb")
     table_name = "bold_public"
-    extract_path = Path(output_path).with_suffix("")
+    extract_path = output_path.with_suffix("")
 
     # stream data to duckdb
     try:
