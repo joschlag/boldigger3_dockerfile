@@ -1,13 +1,18 @@
 FROM python:3.11-slim
 
-#ENV DEBIAN_FRONTEND=noninteractive
-WORKDIR /app
+ENV DEBIAN_FRONTEND=noninteractive
+#WORKDIR /app
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libffi-dev \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+    libssl-dev \
+    libsqlite3-dev \
+    libxml2-dev \
+    libxslt1-dev \
+    build-essential
+
     
 #RUN apt-get update && apt-get install -y --no-install-recommends \
 #    gcc \
@@ -21,10 +26,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
  RUN pip install --upgrade pip \
     && pip install boldigger3==2.0.1 \
-    && pip install "lxml[html_clean]"
+    && pip install "lxml[html_clean]" \
+    && rm -rf /var/lib/apt/lists/*
 
 #RUN mkdir -p /data
-#WORKDIR /data
+WORKDIR /data
 
 # Copy patched scripts from local repo into container
 # Make sure these are in the same GitHub repo where the Dockerfile lives
