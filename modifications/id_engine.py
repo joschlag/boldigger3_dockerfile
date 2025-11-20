@@ -493,9 +493,8 @@ def download_json(
         retry_queue: dict,
 ):
     """
-    Download JSON results for active jobs.
-    Moves timed-out jobs to retry_queue instead of restarting workflow.
-    Never returns early.
+    Download JSON results for all active jobs.
+    Adds robust retry handling, backoff, and permanent-failure detection.
     """
 
     # Set missing last_checked timestamps
@@ -503,25 +502,36 @@ def download_json(
         if req.last_checked is None:
             req.last_checked = datetime.datetime.now()
 
+        # ---- NEW: Ensure retry counters always exist ----
+        if not hasattr(req, "retry_count"):
+            req.retry_count = 0                                    # ← NEW
+        if not hasattr(req, "max_retries"):
+            req.max_retries = 5                                    # ← NEW
+
     with requests_html.HTMLSession() as session:
         completed = []
 
         for key, req in list(active_queue.items()):
             now = datetime.datetime.now()
 
-            # ----- TIMEOUT HANDLING -----
+            # ===============================
+            # 1. TIMEOUT HANDLING
+            # ===============================
             if now - req.timestamp > datetime.timedelta(minutes=15):
 
                 tqdm.write(f"{now:%H:%M:%S}: Request {key} timed out.")
 
-                # Move to retry queue
-                req.retry_count = getattr(req, "retry_count", 0) + 1
-                req.max_retries = getattr(req, "max_retries", 5)
+                req.retry_count += 1
 
                 if req.retry_count <= req.max_retries:
+                    # ---- NEW: Exponential backoff ----
+                    req.next_attempt = now + datetime.timedelta(
+                        seconds=2 ** req.retry_count               # ← NEW
+                    )
                     tqdm.write(
                         f"{now:%H:%M:%S}: Retrying {key} "
-                        f"({req.retry_count}/{req.max_retries})"
+                        f"({req.retry_count}/{req.max_retries}) – "
+                        f"waiting {2 ** req.retry_count}s."        # ← NEW
                     )
                     retry_queue[key] = req
                 else:
@@ -532,19 +542,69 @@ def download_json(
                 del active_queue[key]
                 continue
 
-            # Wait if next check isn't due yet
+            # -------- NEW: Backoff check --------
+            if hasattr(req, "next_attempt") and now < req.next_attempt:  # ← NEW
+                continue                                                  # ← NEW
+
+            # ===============================
+            # 2. Respect minimum poll interval
+            # ===============================
             if now - req.last_checked < datetime.timedelta(seconds=15):
                 continue
 
-            # Try downloading JSON
-            response = session.get(req.result_url)
+            # Try requesting JSON
+            try:
+                response = session.get(req.result_url)
+            except Exception as e:
+                tqdm.write(f"{now:%H:%M:%S}: Network error for {key}: {e}")
+                # Treat as transient
+                req.retry_count += 1
+                if req.retry_count <= req.max_retries:
+                    req.next_attempt = now + datetime.timedelta(seconds=2 ** req.retry_count)
+                    retry_queue[key] = req
+                else:
+                    tqdm.write(f"{now:%H:%M:%S}: Network failure permanent for {key}.")
+                del active_queue[key]
+                continue
+
             req.last_checked = now
 
-            # Not ready yet
+            # ===============================
+            # 3. Handle BOLD server responses
+            # ===============================
+
+            # ---- Not ready yet (normal) ----
             if response.status_code == 404:
                 continue
 
-            # ---------- SUCCESS ----------
+            # ---- NEW: Permanent errors ----
+            if response.status_code in {400, 403, 410}:  # ← NEW
+                tqdm.write(
+                    f"{now:%H:%M:%S}: Permanent failure for {key} "
+                    f"(HTTP {response.status_code}), discarding."    # ← NEW
+                )
+                del active_queue[key]
+                continue
+
+            # ---- NEW: Transient server errors ----
+            if response.status_code >= 500:  # ← NEW
+                req.retry_count += 1         # ← NEW
+                if req.retry_count <= req.max_retries:
+                    req.next_attempt = now + datetime.timedelta(seconds=2 ** req.retry_count)
+                    tqdm.write(
+                        f"{now:%H:%M:%S}: Server error {response.status_code} "
+                        f"for {key}, retry {req.retry_count}/{req.max_retries} "
+                        f"(waiting {2 ** req.retry_count}s)."        # ← NEW
+                    )
+                    retry_queue[key] = req
+                else:
+                    tqdm.write(
+                        f"{now:%H:%M:%S}: Server error permanent for {key}."
+                    )
+                del active_queue[key]
+                continue
+
+            # ---- SUCCESS ----
             parse_and_save_data(
                 req,
                 response,
@@ -609,86 +669,65 @@ def parquet_to_duckdb(project_directory, database_path):
 
 
 def main(fasta_path: str, database: int, operating_mode: int) -> None:
-    """Main function to run the BOLD identification engine.
+    """Main function to run the BOLD identification engine."""
 
-    Args:
-        fasta_path (str): Path to the fasta file.
-        database (int): The database to use. Can be database 1-8, see readme for details.
-        operating_mode (int): The operating mode to use. Can be 1-4, see readme for details.
-    """
-    # user output
-    tqdm.write(f"{datetime.datetime.now().strftime('%H:%M:%S')}: Reading input fasta.")
+    tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Reading input fasta.")
 
-    # read the input fasta into memory
     fasta_dict, fasta_name, project_directory = parse_fasta(fasta_path)
 
-    # define the order of the fasta dict, can be used to add an order column in the output
     fasta_dict_order = {key: idx for idx, key in enumerate(fasta_dict.keys())}
 
-    # define a name for the duckdb database where the downloaded data will be stored
-    database_path = project_directory.joinpath(
-        "boldigger3_data", f"{fasta_name}.duckdb"
-    )
+    database_path = project_directory.joinpath("boldigger3_data", f"{fasta_name}.duckdb")
 
-    # generate a name for the download queue
     download_queue_name = project_directory.joinpath(
-        "boldigger3_data", "{}_download_queue.pkl".format(fasta_name)
+        "boldigger3_data", f"{fasta_name}_download_queue.pkl"
     )
 
-    # generate a data directory to save the data to, so the working directory won't be cluttered
     data_dir = project_directory.joinpath("boldigger3_data")
     data_dir.mkdir(exist_ok=True)
 
-    # check if any data has been downloaded yet
+    # Check for prior downloads
     fasta_dict = already_downloaded(fasta_dict, database_path)
 
-    # if all data has already been downloaded return to stop the function
     if not fasta_dict:
-        tqdm.write(
-            "{}: All data has already been downloaded.".format(
-                datetime.datetime.now().strftime("%H:%M:%S")
-            )
-        )
+        tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All data has already been downloaded.")
         return None
 
-    # try to open an existing download queue first to finish unfinished downloads
+    # Load existing queue
     try:
-        with open(download_queue_name, "rb") as download_queue_file:
-            download_queue = pickle.load(download_queue_file)
-            tqdm.write(
-                "{}: Found unfinished downloads from previous runs. Continuing download.".format(
-                    datetime.datetime.now().strftime("%H:%M:%S")
-                )
-            )
-            if "retry" not in download_queue:
-                download_queue["retry"] = OrderedDict()
+        with open(download_queue_name, "rb") as f:
+            download_queue = pickle.load(f)
+        tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Found unfinished downloads. Continuing.")
+
+        # ---- FIX 1 — Ensure retry queue exists ----
+        if "retry" not in download_queue:
+            download_queue["retry"] = OrderedDict()
+
     except FileNotFoundError:
-        # if no download queue can be found build it
-        tqdm.write(
-            "{}: Building the download queue.".format(
-                datetime.datetime.now().strftime("%H:%M:%S")
-            )
-        )
-        # build the queue
+        tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Building the download queue.")
         download_queue = build_download_queue(fasta_dict, database, operating_mode)
-        download_queue["retry"] = OrderedDict() 
-        with open(download_queue_name, "wb") as download_queue_file:
-            pickle.dump(download_queue, download_queue_file)
+
+        # ---- FIX 2 — Ensure retry exists on new queue ----
+        download_queue["retry"] = OrderedDict()
+
+        with open(download_queue_name, "wb") as f:
+            pickle.dump(download_queue, f)
+
         tqdm.write(
-            "{}: Added {} requests to the download queue.".format(
-                datetime.datetime.now().strftime("%H:%M:%S"),
-                len(download_queue["waiting"]),
-            )
+            f"{datetime.datetime.now():%H:%M:%S}: Added {len(download_queue['waiting'])} "
+            f"requests to the download queue."
         )
 
-    # calculate the total amounts of downloads
     total_downloads = len(download_queue["waiting"]) + len(download_queue["active"])
 
-    # as long as there is data in the download queue continue the download
+    # ------------------- MAIN DOWNLOAD LOOP -------------------
     with tqdm(total=total_downloads, desc="Finished downloads") as pbar:
+
         while True:
             try:
                 if download_queue["waiting"] or download_queue["active"] or download_queue["retry"]:
+
+                    # ---- FIX 3 — Move retry items safely back to waiting ----
                     if not download_queue["waiting"] and download_queue["retry"]:
                         tqdm.write(
                             f"{datetime.datetime.now():%H:%M:%S}: "
@@ -698,26 +737,20 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                             download_queue["waiting"][key] = req
                             del download_queue["retry"][key]
 
-                    # as long as there are not 4 active requests in the download queue
-                    # move on request from the waiting queue to the active queue
+                    # Fill active queue up to four jobs
                     if len(download_queue["active"]) < 4 and download_queue["waiting"]:
-                        # retrieve one request from the waiting queue
-                        request_id, current_request_object = download_queue[
-                            "waiting"
-                        ].popitem(last=False)
+                        request_id, req_obj = download_queue["waiting"].popitem(last=False)
+
                         tqdm.write(
-                            "{}: Request ID {} has been moved to the active downloads.".format(
-                                datetime.datetime.now().strftime("%H:%M:%S"),
-                                request_id,
-                            )
+                            f"{datetime.datetime.now():%H:%M:%S}: "
+                            f"Request ID {request_id} moved to active downloads."
                         )
-                        # add this request to the active queue
-                        download_queue["active"][request_id] = build_post_request(
-                            current_request_object
-                        )
-                    # check if any of the active queue objects has finished and can be saved and removed
+
+                        download_queue["active"][request_id] = build_post_request(req_obj)
+
                     else:
-                        # check if any of the active downloads has been finished
+                        # ---- FIX 4 — Safe active queue update ----
+                        before = len(download_queue["active"])
                         download_queue["active"] = download_json(
                             download_queue["active"],
                             fasta_dict_order,
@@ -725,46 +758,37 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                             fasta_name,
                             download_queue["retry"],
                         )
-                        # update the progress bar
-                        pbar.update(1)
-                    # after every iteration override the download queue as it is changes along the way
+                        after = len(download_queue["active"])
+
+                        # Only advance the bar for *actual* completed downloads
+                        finished_now = before - after
+                        if finished_now > 0:
+                            pbar.update(finished_now)
+
+                    # Persist queue every loop
                     with open(download_queue_name, "wb") as out_stream:
                         pickle.dump(download_queue, out_stream)
-                # if all downloads are finished raise download finished flag
+
                 else:
                     parquet_to_duckdb(project_directory, database_path)
                     raise DownloadFinished
+
             except DownloadFinished:
-                # check if all downloads are finished: if yes: delete download queue, break the loop
                 fasta_dict = already_downloaded(fasta_dict, database_path)
-                # if there is any unfinished download, requeue
+
                 if fasta_dict:
-                    tqdm.write(
-                        "{}: Requeuing incomplete downloads.".format(
-                            datetime.datetime.now().strftime("%H:%M:%S")
-                        )
-                    )
-                    download_queue = build_download_queue(
-                        fasta_dict, database, operating_mode
-                    )
-                    download_queue["retry"] = OrderedDict() 
-                    
-                    # recalculate the total downloads
-                    total_downloads = len(download_queue["active"]) + len(
-                        download_queue["waiting"]
-                    )
-                    # reset the progress bar for the second round of downloads
+                    tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Requeuing incomplete downloads.")
+
+                    download_queue = build_download_queue(fasta_dict, database, operating_mode)
+                    download_queue["retry"] = OrderedDict()
+
+                    total_downloads = len(download_queue["active"]) + len(download_queue["waiting"])
                     pbar.reset()
                     pbar.total = total_downloads
                     pbar.refresh()
+
                 else:
-                    tqdm.write(
-                        "{}: All downloads finished successfully.".format(
-                            datetime.datetime.now().strftime("%H:%M:%S"),
-                            request_id,
-                        )
-                    )
-                    # finally remove the download queue
+                    tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All downloads finished successfully.")
                     os.remove(download_queue_name)
                     break
 
