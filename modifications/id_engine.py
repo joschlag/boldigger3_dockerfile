@@ -655,12 +655,13 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
     try:
         with open(download_queue_name, "rb") as download_queue_file:
             download_queue = pickle.load(download_queue_file)
-            # user output
             tqdm.write(
-                "{}: Found unfinished downloads from previous runs. Continueing download.".format(
+                "{}: Found unfinished downloads from previous runs. Continuing download.".format(
                     datetime.datetime.now().strftime("%H:%M:%S")
                 )
             )
+            if "retry" not in download_queue:
+                download_queue["retry"] = OrderedDict()
     except FileNotFoundError:
         # if no download queue can be found build it
         tqdm.write(
@@ -670,6 +671,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
         )
         # build the queue
         download_queue = build_download_queue(fasta_dict, database, operating_mode)
+        download_queue["retry"] = OrderedDict() 
         with open(download_queue_name, "wb") as download_queue_file:
             pickle.dump(download_queue, download_queue_file)
         tqdm.write(
@@ -745,6 +747,8 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                     download_queue = build_download_queue(
                         fasta_dict, database, operating_mode
                     )
+                    download_queue["retry"] = OrderedDict() 
+                    
                     # recalculate the total downloads
                     total_downloads = len(download_queue["active"]) + len(
                         download_queue["waiting"]
@@ -763,3 +767,5 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                     # finally remove the download queue
                     os.remove(download_queue_name)
                     break
+
+
