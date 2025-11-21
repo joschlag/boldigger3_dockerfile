@@ -131,31 +131,36 @@ def already_downloaded(fasta_dict: dict, database_path: str) -> dict:
     Returns:
         dict: The dictionary with the fasta data with already downloaded sequences removed.
     """
-    if database_path.is_file():
-        # connect to the database
-        database = duckdb.connect(database_path)
+    # If DB does not exist → nothing downloaded yet
+    if not database_path.is_file():
+        return fasta_dict
 
-        # collect all unique values from the id column
+    # Connect to DuckDB
+    database = duckdb.connect(database_path)
+
+    try:
+        # Try to read the stored IDs
         downloaded_ids = database.execute(
             "SELECT DISTINCT id FROM id_engine_results"
         ).fetchall()
 
-        # close the connection
+    except duckdb.CatalogException:
+        # Table does not exist → treat as empty database
         database.close()
-
-        # flatten the downloaded ids into a set for faster lookup
-        downloaded_ids = {row[0] for row in downloaded_ids}
-
-        # filter the fasta_dict
-        fasta_dict = {
-            id: seq for (id, seq) in fasta_dict.items() if id not in downloaded_ids
-        }
-
-        # return the updated dict
         return fasta_dict
-    else:
-        # return the fasta dict unchanged
-        return fasta_dict
+
+    # Close DB
+    database.close()
+
+    # Convert rows to a set of IDs
+    downloaded_ids = {row[0] for row in downloaded_ids}
+
+    # Filter out already downloaded IDs
+    return {
+        seq_id: seq
+        for seq_id, seq in fasta_dict.items()
+        if seq_id not in downloaded_ids
+    }
 
 
 def build_url_params(database: int, operating_mode: int) -> tuple:
@@ -909,6 +914,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All downloads finished successfully.")
                     os.remove(download_queue_name)
                     break
+
 
 
 
