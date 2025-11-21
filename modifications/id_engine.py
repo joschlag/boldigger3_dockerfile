@@ -827,14 +827,19 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
         with open(download_queue_name, "rb") as f:
             download_queue = pickle.load(f)
         tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Found unfinished downloads. Continuing.")
+
+        # Ensure retry queue exists
         if "retry" not in download_queue:
             download_queue["retry"] = OrderedDict()
+
     except FileNotFoundError:
         tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Building the download queue.")
         download_queue = build_download_queue(fasta_dict, database, operating_mode)
         download_queue["retry"] = OrderedDict()
+
         with open(download_queue_name, "wb") as f:
             pickle.dump(download_queue, f)
+
         tqdm.write(
             f"{datetime.datetime.now():%H:%M:%S}: Added {len(download_queue['waiting'])} "
             f"requests to the download queue."
@@ -847,7 +852,8 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
         while True:
             try:
                 if download_queue["waiting"] or download_queue["active"] or download_queue["retry"]:
-                    # Move retry items back to waiting if nothing else
+
+                    # Move retry items back to waiting if nothing is waiting
                     if not download_queue["waiting"] and download_queue["retry"]:
                         tqdm.write(
                             f"{datetime.datetime.now():%H:%M:%S}: "
@@ -867,7 +873,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                         download_queue["active"][request_id] = build_post_request(req_obj)
 
                     else:
-                        # Update active queue and detect completed downloads
+                        # Update active queue and remove completed requests
                         before = len(download_queue["active"])
                         download_queue["active"] = download_json(
                             download_queue["active"],
@@ -877,6 +883,8 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                             download_queue["retry"],
                         )
                         after = len(download_queue["active"])
+
+                        # Only advance the progress bar for actual completed downloads
                         finished_now = before - after
                         if finished_now > 0:
                             pbar.update(finished_now)
@@ -891,14 +899,18 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
 
             except DownloadFinished:
                 fasta_dict = already_downloaded(fasta_dict, database_path)
+
                 if fasta_dict:
                     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Requeuing incomplete downloads.")
+
                     download_queue = build_download_queue(fasta_dict, database, operating_mode)
                     download_queue["retry"] = OrderedDict()
+
                     total_downloads = len(download_queue["active"]) + len(download_queue["waiting"])
                     pbar.reset()
                     pbar.total = total_downloads
                     pbar.refresh()
+
                 else:
                     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All downloads finished successfully.")
                     os.remove(download_queue_name)
