@@ -619,34 +619,49 @@ def download_json(
 
         for key, req in list(active_queue.items()):
             now = datetime.datetime.now()
-
-            # ===============================
-            # 1. TIMEOUT HANDLING
-            # ===============================
-            if now - req.timestamp > datetime.timedelta(minutes=15):
-
-                tqdm.write(f"{now:%H:%M:%S}: Request {key} timed out.")
-
-                req.retry_count += 1
-
-                if req.retry_count <= req.max_retries:
-                    # ---- NEW: Exponential backoff ----
-                    req.next_attempt = now + datetime.timedelta(
-                        seconds=2 ** req.retry_count               # ← NEW
+            ...
+            # ---- SUCCESS OR PARSE FAILURE ----
+            if response.text.strip():
+                try:
+                    parse_and_save_data(
+                        req,
+                        response,
+                        fasta_order,
+                        key,
+                        project_directory,
+                        fasta_name,
                     )
+                    tqdm.write(f"{now:%H:%M:%S}: Downloaded request {key}.")
+                    completed.append(key)
+                
+                except Exception as e:
                     tqdm.write(
-                        f"{now:%H:%M:%S}: Retrying {key} "
-                        f"({req.retry_count}/{req.max_retries}) – "
-                        f"waiting {2 ** req.retry_count}s."        # ← NEW
+                        f"{now:%H:%M:%S}: JSON parse failed for request {key}, retrying. Error: {e}"
                     )
+                    req.retry_count += 1
+                    if req.retry_count <= req.max_retries:
+                        req.next_attempt = now + datetime.timedelta(seconds=2 ** req.retry_count)
+                        retry_queue[key] = req
+                        tqdm.write(
+                            f"{now:%H:%M:%S}: Parse retry {req.retry_count}/{req.max_retries}, "
+                            f"waiting {2 ** req.retry_count}s."
+                        )
+                    else:
+                        tqdm.write(
+                            f"{now:%H:%M:%S}: Request {key} failed permanently due to repeated invalid JSON."
+                        )
+                    del active_queue[key]
+                    continue   # ← now valid, inside the loop
+            else:
+                tqdm.write(f"{now:%H:%M:%S}: Empty response for request {key}, will retry.")
+                req.retry_count += 1
+                if req.retry_count <= req.max_retries:
+                    req.next_attempt = now + datetime.timedelta(seconds=2 ** req.retry_count)
                     retry_queue[key] = req
                 else:
-                    tqdm.write(
-                        f"{now:%H:%M:%S}: Request {key} failed permanently."
-                    )
-
+                    tqdm.write(f"{now:%H:%M:%S}: Request {key} failed permanently due to empty response.")
                 del active_queue[key]
-                continue
+                continue   # ← also valid now
 
             # -------- NEW: Backoff check --------
             if hasattr(req, "next_attempt") and now < req.next_attempt:  # ← NEW
@@ -928,6 +943,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All downloads finished successfully.")
                     os.remove(download_queue_name)
                     break
+
 
 
 
