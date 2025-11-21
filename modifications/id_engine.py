@@ -771,14 +771,16 @@ def parquet_to_duckdb(project_directory, database_path):
 
     try:
         if not db_exists:
-            # First insert: create table from parquet files
-            parquet_list = "','".join(str(f) for f in parquet_files)
+            # -------- FIXED: Quote each path properly --------
+            parquet_list = ", ".join(f"'{str(f)}'" for f in parquet_files)
+
             con.execute(
                 f"""
                 CREATE TABLE id_engine_results AS
                 SELECT * FROM read_parquet([{parquet_list}])
                 """
             )
+
         else:
             # Insert into existing table
             for file in parquet_files:
@@ -914,6 +916,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All downloads finished successfully.")
                     os.remove(download_queue_name)
                     break
+
 
 
 
