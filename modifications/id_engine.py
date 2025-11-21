@@ -50,7 +50,19 @@ class BoldIdRequest:
         self.operating_mode = None
         self.download_url = ""
         self.last_checked = None
+        
+        # ================================================
+        # NEW FIELDS REQUIRED BY PATCH 1 + PATCH 2
+        # ================================================
 
+        # Count how many times a request has failed
+        self.retry_count = 0              # ← Needed for timeouts & 5xx retries
+
+        # Maximum number of retries before permanent failure
+        self.max_retries = 5              # ← Set default here
+
+        # Used for exponential backoff (download_json checks this)
+        self.next_attempt = None          # ← Needed to avoid hammering the API
 
 def parse_fasta(fasta_path: str) -> tuple:
     """Function to read a fasta file and parse it into a dictionary.
@@ -196,99 +208,165 @@ def build_download_queue(fasta_dict: dict, database: int, operating_mode: int) -
 
     Args:
         fasta_dict (dict): Dict that holds the data in the fasta file.
-        download_queue_name (str): String that holds the path where the download queue is saved.
         database (int): Between 1 and 7 referring to the database, see readme for details.
         operating_mode (int): Between 1 and 3 referring to the operating mode, see readme for details
 
     Returns:
-        dict: The dictionary with the downloaded queue
+        dict: The dictionary with the download queue
 
     """
-    # initialize the download queue
-    download_queue = {"waiting": OrderedDict(), "active": dict()}
+    # Initialize queue with new retry container
+    download_queue = {
+        "waiting": OrderedDict(),
+        "active": dict(),
+        "retry": dict(),          # ← NEW (required for patch 1+2)
+    }
 
-    # build the base url and the params
+    # Build URL + params
     base_url, params = build_url_params(database, operating_mode)
 
-    # determine the query size from the params
+    # Determine chunk size
     query_size_dict = {0.94: 1000, 0.9: 200, 0.75: 100}
     query_size = query_size_dict[params["mi"]]
 
-    # split the fasta dict in query sized chunks
+    # Split fasta sequences into batches
     query_data = more_itertools.chunked(fasta_dict.keys(), query_size)
 
-    # produce a generator that holds all sequence and key data to loop over for the post requests
+    # Create the actual payload strings
     query_generators = (
         [f">{key}\n{fasta_dict[key].seq}\n" for key in query_subset]
         for query_subset in query_data
     )
 
+    # Build request objects
     for idx, query_generator in enumerate(query_generators, start=1):
-        # initialize the bold id engine request
         bold_request = BoldIdRequest()
+
         bold_request.base_url = base_url
         bold_request.params = params
         bold_request.query_data = query_generator
         bold_request.database = database
         bold_request.operating_mode = operating_mode
+
+        # ---------------------------------------------------
+        # NEW: ensure retry/backoff attributes exist
+        # (safety required by patched download_json())
+        # ---------------------------------------------------
+        bold_request.retry_count = 0
+        bold_request.max_retries = 5
+        bold_request.next_attempt = None
+        bold_request.last_checked = None
+        bold_request.timestamp = None
+        # ---------------------------------------------------
+
         download_queue["waiting"][idx] = bold_request
 
     return download_queue
 
 
 def build_post_request(BoldIdRequest: object) -> object:
-    """Function to send the POST request for the dataset to the BOLD id engine.
+    """Function to send a POST request to the BOLD ID engine.
 
-    Args:
-        bold_id_request (object): A BoldIdRequest object that holds all the information needed to send the request
-
-    Returns:
-        object: Returns the BoldIdRequest object with an added result url
+    Integrates with the global retry system.
+    Adds:
+        - bounded retries
+        - exponential backoff
+        - next_attempt scheduling
+        - timestamp creation
     """
-    # send the post requests
+
+    # --- ensure retry attributes (safety) ---
+    if not hasattr(BoldIdRequest, "retry_count"):
+        BoldIdRequest.retry_count = 0
+    if not hasattr(BoldIdRequest, "max_retries"):
+        BoldIdRequest.max_retries = 5
+    if not hasattr(BoldIdRequest, "next_attempt"):
+        BoldIdRequest.next_attempt = None
+
     with requests_html.HTMLSession() as session:
 
-        # build a retry strategy for the html session
         session.headers.update(
             {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.82 Safari/537.36"
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/98.0.4758.82 Safari/537.36"
+                )
             }
         )
-        retry_strategy = Retry(total=10, backoff_factor=1)
+
+        retry_strategy = Retry(total=5, backoff_factor=1)  # keep internal retry low
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("https://", adapter)
 
         data = "".join(BoldIdRequest.query_data)
-
-        # generate the files to send via the id engine
         files = {"fasta_file": ("submitted.fas", data, "text/plain")}
 
-        while True:
-            try:
-                # submit the post request
-                response = session.post(
-                    BoldIdRequest.base_url,
-                    params=BoldIdRequest.params,
-                    files=files,
-                    timeout=10000,
-                )
+        try:
+            # --- attempt POST ---
+            response = session.post(
+                BoldIdRequest.base_url,
+                params=BoldIdRequest.params,
+                files=files,
+                timeout=30,
+            )
 
-                # fetch the result
-                result = json.loads(response.text)
-                break
-            except (JSONDecodeError, ReadTimeout):
-                # user output
+            # parse JSON
+            result = json.loads(response.text)
+
+        except Exception as e:
+            # ----------- transient failure -----------
+            BoldIdRequest.retry_count += 1
+
+            if BoldIdRequest.retry_count <= BoldIdRequest.max_retries:
+                wait_seconds = 2 ** BoldIdRequest.retry_count
+                BoldIdRequest.next_attempt = datetime.datetime.now() + datetime.timedelta(
+                    seconds=wait_seconds
+                )
                 tqdm.write(
-                    f"{datetime.datetime.now().strftime('%H:%M:%S')}: Building the request failed. Waiting 60 seconds for repeat."
+                    f"{datetime.datetime.now():%H:%M:%S}: POST failed ({e}). "
+                    f"Retry {BoldIdRequest.retry_count}/{BoldIdRequest.max_retries}; "
+                    f"waiting {wait_seconds}s."
                 )
-                # wait 60 seconds
-                time.sleep(60)
+            else:
+                tqdm.write(
+                    f"{datetime.datetime.now():%H:%M:%S}: POST permanently failed: {e}"
+                )
+                BoldIdRequest.next_attempt = None  # stops future attempts
 
-        result_url = f"https://id.boldsystems.org/submission/results/{result['sub_id']}"
+            return BoldIdRequest
 
-        # append the resulting url
-        BoldIdRequest.result_url = result_url
+        # --- if JSON is malformed or contains an error ---
+        if not isinstance(result, dict) or "sub_id" not in result:
+            BoldIdRequest.retry_count += 1
+
+            if BoldIdRequest.retry_count <= BoldIdRequest.max_retries:
+                wait_seconds = 2 ** BoldIdRequest.retry_count
+                BoldIdRequest.next_attempt = datetime.datetime.now() + datetime.timedelta(
+                    seconds=wait_seconds
+                )
+
+                tqdm.write(
+                    f"{datetime.datetime.now():%H:%M:%S}: Invalid BOLD response. "
+                    f"Retry {BoldIdRequest.retry_count}/{BoldIdRequest.max_retries}; "
+                    f"waiting {wait_seconds}s."
+                )
+            else:
+                tqdm.write(
+                    f"{datetime.datetime.now():%H:%M:%S}: Invalid response permanent failure."
+                )
+                BoldIdRequest.next_attempt = None
+
+            return BoldIdRequest
+
+        # ---------------- SUCCESS ----------------
+        BoldIdRequest.result_url = (
+            f"https://id.boldsystems.org/submission/results/{result['sub_id']}"
+        )
+
         BoldIdRequest.timestamp = datetime.datetime.now()
+        BoldIdRequest.last_checked = None
+        BoldIdRequest.next_attempt = None  # clear backoff
 
         return BoldIdRequest
 
@@ -350,8 +428,36 @@ def parse_and_save_data(
         request_id (int): Request id, used to save the file.
         database_path (str): Path to the database to write to.
     """
+    raw_lines = list(response.iter_lines())
+
+    # Case 1 — No content returned at all
+    if not raw_lines:
+        tqdm.write(f"⚠ Warning: request {request_id} returned EMPTY response; saving empty file.")
+        id_engine_result = pd.DataFrame()
+        output_file = database_path.joinpath(
+            "boldigger3_data", f"request_id_{request_id}_{fasta_name}.parquet.snappy"
+        )
+        id_engine_result.to_parquet(output_file)
+        return
+    # Case 2 — Try to decode JSON lines
+    json_objects = []
+    for line in raw_lines:
+        try:
+            json_objects.append(json.loads(line))
+        except json.JSONDecodeError as e:
+            tqdm.write(
+                f"⚠ JSON decode error in request {request_id}: {e}. "
+                f"Corrupt or partial data; saving empty result."
+            )
+            id_engine_result = pd.DataFrame()
+            output_file = database_path.joinpath(
+                "boldigger3_data", f"request_id_{request_id}_{fasta_name}.parquet.snappy"
+            )
+            id_engine_result.to_parquet(output_file)
+            return
+    
     # parse out all objects from the response
-    json_objects = [json.loads(line) for line in response.iter_lines()]
+    #json_objects = [json.loads(line) for line in response.iter_lines()]
 
     # store the resulting tables rows here when parsing the jsons
     rows = []
@@ -604,17 +710,41 @@ def download_json(
                 del active_queue[key]
                 continue
 
-            # ---- SUCCESS ----
-            parse_and_save_data(
-                req,
-                response,
-                fasta_order,
-                key,
-                project_directory,
-                fasta_name,
-            )
-            tqdm.write(f"{now:%H:%M:%S}: Downloaded request {key}.")
-            completed.append(key)
+# ---- SUCCESS OR PARSE FAILURE ----
+try:
+    parse_and_save_data(
+        req,
+        response,
+        fasta_order,
+        key,
+        project_directory,
+        fasta_name,
+    )
+    tqdm.write(f"{now:%H:%M:%S}: Downloaded request {key}.")
+    completed.append(key)
+
+except Exception as e:
+    # Patch 2: Handle invalid/empty JSON safely
+    tqdm.write(
+        f"{now:%H:%M:%S}: JSON parse failed for request {key}, retrying. Error: {e}"
+    )
+
+    req.retry_count += 1
+
+    if req.retry_count <= req.max_retries:
+        req.next_attempt = now + datetime.timedelta(seconds=2 ** req.retry_count)
+        retry_queue[key] = req
+        tqdm.write(
+            f"{now:%H:%M:%S}: Parse retry {req.retry_count}/{req.max_retries}, "
+            f"waiting {2 ** req.retry_count}s."
+        )
+    else:
+        tqdm.write(
+            f"{now:%H:%M:%S}: Request {key} failed permanently due to repeated invalid JSON."
+        )
+
+    del active_queue[key]
+    continue
 
         # Remove completed from active queue
         for key in completed:
@@ -624,49 +754,51 @@ def download_json(
 
 
 def parquet_to_duckdb(project_directory, database_path):
-    """Function to stream the parquet output to duckdb.
+    """Stream parquet outputs into duckdb safely.
 
     Args:
-        project_directory (str): Project directory to work in.
-        database_path (str): Path to the database.
+        project_directory (Path): Project directory to work in.
+        database_path (Path): Path to the duckdb database.
     """
-    # check if duck db already exists
+    data_dir = project_directory.joinpath("boldigger3_data")
+    parquet_files = list(data_dir.glob("request_id_*.parquet.snappy"))
+
+    if not parquet_files:
+        tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: No parquet files to insert into DuckDB.")
+        return
+
     db_exists = database_path.exists()
-
-    # fetch the parquet path
-    parquet_path = project_directory.joinpath(
-        "boldigger3_data", "request_id_*.parquet.snappy"
-    )
-
-    # connect to the database
-    database = duckdb.connect(database_path)
+    con = duckdb.connect(database_path)
 
     try:
-        # insert is db exists already, create table if not
         if not db_exists:
-            # Create the table
-            database.execute(
+            # First insert: create table from parquet files
+            parquet_list = "','".join(str(f) for f in parquet_files)
+            con.execute(
                 f"""
                 CREATE TABLE id_engine_results AS
-                SELECT * FROM read_parquet('{parquet_path}')
-            """
+                SELECT * FROM read_parquet([{parquet_list}])
+                """
             )
         else:
-            database.execute(
-                f"""
-            INSERT INTO id_engine_results
-            SELECT * FROM read_parquet('{parquet_path}')
-            """
-            )
-    except duckdb.IOException:
-        # if no parquet files are there dues to killed downloads, just continue
-        pass
+            # Insert into existing table
+            for file in parquet_files:
+                try:
+                    con.execute(
+                        f"""
+                        INSERT INTO id_engine_results
+                        SELECT * FROM read_parquet('{file}')
+                        """
+                    )
+                except duckdb.IOException as e:
+                    tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Skipping {file} due to error: {e}")
+    finally:
+        con.close()
 
-    # remove all parquet files if finished successfully
-    for file in project_directory.joinpath("boldigger3_data").glob("*.parquet.snappy"):
+    # Remove successfully ingested parquet files
+    for file in parquet_files:
         if file.is_file():
             file.unlink()
-
 
 def main(fasta_path: str, database: int, operating_mode: int) -> None:
     """Main function to run the BOLD identification engine."""
@@ -674,11 +806,9 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Reading input fasta.")
 
     fasta_dict, fasta_name, project_directory = parse_fasta(fasta_path)
-
     fasta_dict_order = {key: idx for idx, key in enumerate(fasta_dict.keys())}
 
     database_path = project_directory.joinpath("boldigger3_data", f"{fasta_name}.duckdb")
-
     download_queue_name = project_directory.joinpath(
         "boldigger3_data", f"{fasta_name}_download_queue.pkl"
     )
@@ -688,7 +818,6 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
 
     # Check for prior downloads
     fasta_dict = already_downloaded(fasta_dict, database_path)
-
     if not fasta_dict:
         tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All data has already been downloaded.")
         return None
@@ -698,21 +827,14 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
         with open(download_queue_name, "rb") as f:
             download_queue = pickle.load(f)
         tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Found unfinished downloads. Continuing.")
-
-        # ---- FIX 1 — Ensure retry queue exists ----
         if "retry" not in download_queue:
             download_queue["retry"] = OrderedDict()
-
     except FileNotFoundError:
         tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Building the download queue.")
         download_queue = build_download_queue(fasta_dict, database, operating_mode)
-
-        # ---- FIX 2 — Ensure retry exists on new queue ----
         download_queue["retry"] = OrderedDict()
-
         with open(download_queue_name, "wb") as f:
             pickle.dump(download_queue, f)
-
         tqdm.write(
             f"{datetime.datetime.now():%H:%M:%S}: Added {len(download_queue['waiting'])} "
             f"requests to the download queue."
@@ -722,12 +844,10 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
 
     # ------------------- MAIN DOWNLOAD LOOP -------------------
     with tqdm(total=total_downloads, desc="Finished downloads") as pbar:
-
         while True:
             try:
                 if download_queue["waiting"] or download_queue["active"] or download_queue["retry"]:
-
-                    # ---- FIX 3 — Move retry items safely back to waiting ----
+                    # Move retry items back to waiting if nothing else
                     if not download_queue["waiting"] and download_queue["retry"]:
                         tqdm.write(
                             f"{datetime.datetime.now():%H:%M:%S}: "
@@ -740,16 +860,14 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                     # Fill active queue up to four jobs
                     if len(download_queue["active"]) < 4 and download_queue["waiting"]:
                         request_id, req_obj = download_queue["waiting"].popitem(last=False)
-
                         tqdm.write(
                             f"{datetime.datetime.now():%H:%M:%S}: "
                             f"Request ID {request_id} moved to active downloads."
                         )
-
                         download_queue["active"][request_id] = build_post_request(req_obj)
 
                     else:
-                        # ---- FIX 4 — Safe active queue update ----
+                        # Update active queue and detect completed downloads
                         before = len(download_queue["active"])
                         download_queue["active"] = download_json(
                             download_queue["active"],
@@ -759,8 +877,6 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                             download_queue["retry"],
                         )
                         after = len(download_queue["active"])
-
-                        # Only advance the bar for *actual* completed downloads
                         finished_now = before - after
                         if finished_now > 0:
                             pbar.update(finished_now)
@@ -775,21 +891,18 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
 
             except DownloadFinished:
                 fasta_dict = already_downloaded(fasta_dict, database_path)
-
                 if fasta_dict:
                     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Requeuing incomplete downloads.")
-
                     download_queue = build_download_queue(fasta_dict, database, operating_mode)
                     download_queue["retry"] = OrderedDict()
-
                     total_downloads = len(download_queue["active"]) + len(download_queue["waiting"])
                     pbar.reset()
                     pbar.total = total_downloads
                     pbar.refresh()
-
                 else:
                     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All downloads finished successfully.")
                     os.remove(download_queue_name)
                     break
+
 
 
