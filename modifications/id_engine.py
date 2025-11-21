@@ -753,12 +753,6 @@ def download_json(
 
 
 def parquet_to_duckdb(project_directory, database_path):
-    """Stream parquet outputs into duckdb safely.
-
-    Args:
-        project_directory (Path): Project directory to work in.
-        database_path (Path): Path to the duckdb database.
-    """
     data_dir = project_directory.joinpath("boldigger3_data")
     parquet_files = list(data_dir.glob("request_id_*.parquet.snappy"))
 
@@ -766,21 +760,33 @@ def parquet_to_duckdb(project_directory, database_path):
         tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: No parquet files to insert into DuckDB.")
         return
 
-    db_exists = database_path.exists()
     con = duckdb.connect(database_path)
 
+    # --- NEW: detect whether the table exists ---
+    table_exists = False
     try:
-        if not db_exists:
-            # -------- FIXED: Quote each path properly --------
-            parquet_list = ", ".join(f"'{str(f)}'" for f in parquet_files)
+        result = con.execute(
+            """
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_name = 'id_engine_results'
+            """
+        ).fetchone()
+        table_exists = result is not None
+    except Exception:
+        table_exists = False
+    # --------------------------------------------
 
+    try:
+        if not table_exists:
+            # First insert: create table from parquet files
+            parquet_list = ", ".join(f"'{str(f)}'" for f in parquet_files)
             con.execute(
                 f"""
                 CREATE TABLE id_engine_results AS
                 SELECT * FROM read_parquet([{parquet_list}])
                 """
             )
-
         else:
             # Insert into existing table
             for file in parquet_files:
@@ -793,6 +799,7 @@ def parquet_to_duckdb(project_directory, database_path):
                     )
                 except duckdb.IOException as e:
                     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Skipping {file} due to error: {e}")
+
     finally:
         con.close()
 
@@ -916,6 +923,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All downloads finished successfully.")
                     os.remove(download_queue_name)
                     break
+
 
 
 
