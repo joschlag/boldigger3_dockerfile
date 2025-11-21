@@ -613,6 +613,7 @@ def download_json(
             req.retry_count = 0
         if not hasattr(req, "max_retries"):
             req.max_retries = 5
+            
 
     with requests_html.HTMLSession() as session:
         completed = []
@@ -642,7 +643,7 @@ def download_json(
                 continue
 
             # -------- NEW: Backoff check --------
-            if hasattr(req, "next_attempt") and now < req.next_attempt:
+            if getattr(req, "next_attempt", None) and now < req.next_attempt:
                 continue
 
             # ===============================
@@ -908,6 +909,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All downloads finished successfully.")
                     os.remove(download_queue_name)
                     break
+
 
 
 
