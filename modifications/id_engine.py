@@ -629,6 +629,9 @@ def download_json(
             # ===============================
             # 1. TIMEOUT HANDLING
             # ===============================
+            if req.timestamp is None:
+                req.timestamp = now
+
             if now - req.timestamp > datetime.timedelta(minutes=15):
                 tqdm.write(f"{now:%H:%M:%S}: Request {key} timed out.")
                 req.retry_count += 1
@@ -923,6 +926,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All downloads finished successfully.")
                     os.remove(download_queue_name)
                     break
+
 
 
 
