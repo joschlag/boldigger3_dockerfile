@@ -596,6 +596,31 @@ def parse_and_save_data(
 #                     # return the active queue
 #                     return active_queue
 
+def log_failed_request(req, request_id, fasta_order, project_directory, reason):
+    """
+    Log permanently failed requests to failed_requests.log.
+    Includes FASTA header and sequence.
+    """
+
+    log_path = project_directory.joinpath("boldigger3_data", "failed_requests.log")
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # req holds fasta_header and sequence because build_post_request attaches them
+    fasta_header = getattr(req, "fasta_header", "UNKNOWN_HEADER")
+    sequence = getattr(req, "sequence", "UNKNOWN_SEQUENCE")
+
+    with open(log_path, "a", encoding="utf-8") as logfile:
+        logfile.write(
+            f"==== FAILED REQUEST ====\n"
+            f"Timestamp: {now}\n"
+            f"Request ID: {request_id}\n"
+            f"Reason: {reason}\n"
+            f"FASTA Header: {fasta_header}\n"
+            f"Sequence: {sequence}\n"
+            f"------------------------\n\n"
+        )
+
+
 def download_json(
         active_queue: dict,
         fasta_order: dict,
@@ -613,7 +638,7 @@ def download_json(
         if req.last_checked is None:
             req.last_checked = datetime.datetime.now()
 
-        # ---- NEW: Ensure retry counters always exist ----
+        # ---- Ensure retry/backoff fields exist ----
         if not hasattr(req, "retry_count"):
             req.retry_count = 0
         if not hasattr(req, "max_retries"):
@@ -622,7 +647,6 @@ def download_json(
             req.next_attempt = None
         if not hasattr(req, "timestamp"):
             req.timestamp = None
-            
 
     with requests_html.HTMLSession() as session:
         completed = []
@@ -650,17 +674,16 @@ def download_json(
                     retry_queue[key] = req
                 else:
                     tqdm.write(f"{now:%H:%M:%S}: Request {key} failed permanently.")
-                    # remove from retry_queue if present to avoid re-insertion later
-                    retry_queue.pop(key, None)  # ← NEW
+                    log_failed_request(req, key, fasta_order, project_directory, "Timeout exceeded")
+                    retry_queue.pop(key, None)
 
-                # always remove from active_queue after handling timeout
                 active_queue.pop(key, None)
                 continue
 
-
-            # -------- NEW: Backoff check --------
+            # -------- Backoff check --------
             if req.next_attempt and now < req.next_attempt:
                 continue
+
             # ===============================
             # 2. Respect minimum poll interval
             # ===============================
@@ -673,6 +696,7 @@ def download_json(
             except Exception as e:
                 tqdm.write(f"{now:%H:%M:%S}: Network error for {key}: {e}")
                 req.retry_count += 1
+
                 if req.retry_count <= req.max_retries:
                     wait = 2 ** req.retry_count
                     req.next_attempt = now + datetime.timedelta(seconds=wait)
@@ -680,7 +704,9 @@ def download_json(
                     tqdm.write(f"{now:%H:%M:%S}: Network retry {req.retry_count}/{req.max_retries}, waiting {wait}s.")
                 else:
                     tqdm.write(f"{now:%H:%M:%S}: Network failure permanent for {key}.")
-                    retry_queue.pop(key, None)  # ← NEW
+                    log_failed_request(req, key, fasta_order, project_directory, f"Network error: {e}")
+                    retry_queue.pop(key, None)
+
                 active_queue.pop(key, None)
                 continue
 
@@ -699,14 +725,15 @@ def download_json(
                     f"{now:%H:%M:%S}: Permanent failure for {key} "
                     f"(HTTP {response.status_code}), discarding."
                 )
-                # ensure it's removed from retry queue as well
-                retry_queue.pop(key, None)  # ← NEW
+                log_failed_request(req, key, fasta_order, project_directory, f"HTTP {response.status_code}")
+                retry_queue.pop(key, None)
                 active_queue.pop(key, None)
                 continue
 
             # Server errors -> retry with backoff
             if response.status_code >= 500:
                 req.retry_count += 1
+
                 if req.retry_count <= req.max_retries:
                     wait = 2 ** req.retry_count
                     req.next_attempt = now + datetime.timedelta(seconds=wait)
@@ -718,7 +745,10 @@ def download_json(
                     retry_queue[key] = req
                 else:
                     tqdm.write(f"{now:%H:%M:%S}: Server error permanent for {key}.")
-                    retry_queue.pop(key, None)  # ← NEW
+                    log_failed_request(req, key, fasta_order, project_directory,
+                                       f"HTTP {response.status_code} (server error)")
+                    retry_queue.pop(key, None)
+
                 active_queue.pop(key, None)
                 continue
 
@@ -741,6 +771,7 @@ def download_json(
                         f"{now:%H:%M:%S}: JSON parse failed for request {key}, retrying. Error: {e}"
                     )
                     req.retry_count += 1
+
                     if req.retry_count <= req.max_retries:
                         wait = 2 ** req.retry_count
                         req.next_attempt = now + datetime.timedelta(seconds=wait)
@@ -753,23 +784,32 @@ def download_json(
                         tqdm.write(
                             f"{now:%H:%M:%S}: Request {key} failed permanently due to repeated invalid JSON."
                         )
-                        retry_queue.pop(key, None)  # ← NEW
+                        log_failed_request(req, key, fasta_order, project_directory, "Repeated invalid JSON")
+                        retry_queue.pop(key, None)
+
                     active_queue.pop(key, None)
                     continue
+
             else:
                 tqdm.write(f"{now:%H:%M:%S}: Empty response for request {key}, will retry.")
+
                 req.retry_count += 1
+
                 if req.retry_count <= req.max_retries:
                     wait = 2 ** req.retry_count
                     req.next_attempt = now + datetime.timedelta(seconds=wait)
                     retry_queue[key] = req
                 else:
-                    tqdm.write(f"{now:%H:%M:%S}: Request {key} failed permanently due to empty response.")
-                    retry_queue.pop(key, None)  # ← NEW
+                    tqdm.write(
+                        f"{now:%H:%M:%S}: Request {key} failed permanently due to empty response."
+                    )
+                    log_failed_request(req, key, fasta_order, project_directory, "Repeated empty response")
+                    retry_queue.pop(key, None)
+
                 active_queue.pop(key, None)
                 continue
 
-        # Remove completed from active queue
+        # Remove completed
         for key in completed:
             active_queue.pop(key, None)
 
@@ -946,6 +986,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All downloads finished successfully.")
                     os.remove(download_queue_name)
                     break
+
 
 
 
