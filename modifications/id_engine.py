@@ -263,72 +263,190 @@ def build_post_request(BoldIdRequest: object) -> object:
     """
     Sends a POST request to the BOLD ID engine.
     Preserves all fields needed for the download loop.
+
+    Changes:
+    - Pre-flight DNS/TCP/TLS probe (non-fatal) and logging.             # ← NEW
+    - Payload/header debug logging just before POST.                   # ← NEW
+    - Attach fasta_header and sequence to request object for logging.  # ← NEW
     """
 
-    # ensure retry/backoff attributes exist
+    # --- ensure retry/backoff attributes exist and have sensible types ---
     for attr in ["retry_count", "max_retries", "next_attempt", "timestamp", "last_checked"]:
         if not hasattr(BoldIdRequest, attr):
-            setattr(BoldIdRequest, attr, None if attr in ["next_attempt", "timestamp", "last_checked"] else 0)
+            # integer counters default to 0, others default to None
+            if attr in ["retry_count", "max_retries"]:
+                setattr(BoldIdRequest, attr, 0 if attr == "retry_count" else 5)
+            else:
+                setattr(BoldIdRequest, attr, None)
 
+    # --- Prepare payload and attach FASTA header/sequence for logging/troubleshooting ---  # ← NEW
+    data = "".join(BoldIdRequest.query_data)
+    # Try to extract the first FASTA header and the first sequence for logging
+    fasta_header = "UNKNOWN_HEADER"
+    fasta_sequence = ""
+    try:
+        # split by lines, find first line that starts with '>'
+        lines = data.splitlines()
+        for i, ln in enumerate(lines):
+            if ln.startswith(">"):
+                fasta_header = ln[1:].strip()
+                # next non-header lines until next '>' or end -> sequence
+                seq_lines = []
+                for later in lines[i + 1 :]:
+                    if later.startswith(">"):
+                        break
+                    seq_lines.append(later.strip())
+                fasta_sequence = "".join(seq_lines)
+                break
+    except Exception:
+        fasta_header = "UNKNOWN_HEADER"
+        fasta_sequence = ""
+
+    # attach them so log_failed_request can access them later  # ← NEW
+    try:
+        BoldIdRequest.fasta_header = fasta_header
+        BoldIdRequest.sequence = fasta_sequence
+    except Exception:
+        # non-fatal - keep going
+        pass
+
+    files = {"fasta_file": ("submitted.fas", data, "text/plain")}
+
+    # --- Quick validation of base_url & params ---  # ← NEW
+    base_url = getattr(BoldIdRequest, "base_url", "") or ""
+    params = getattr(BoldIdRequest, "params", {}) or {}
+
+    # If base_url looks empty or invalid, mark for retry and return
+    if not base_url or not isinstance(base_url, str):
+        BoldIdRequest.retry_count = getattr(BoldIdRequest, "retry_count", 0) + 1
+        if BoldIdRequest.retry_count <= getattr(BoldIdRequest, "max_retries", 5):
+            wait_seconds = 2 ** BoldIdRequest.retry_count
+            BoldIdRequest.next_attempt = datetime.datetime.now() + datetime.timedelta(seconds=wait_seconds)
+            tqdm.write(
+                f"{datetime.datetime.now():%H:%M:%S}: POST aborted — invalid base_url. "
+                f"Retry {BoldIdRequest.retry_count}/{BoldIdRequest.max_retries}; waiting {wait_seconds}s."
+            )
+        else:
+            tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: POST permanently failed — invalid base_url.")
+            BoldIdRequest.next_attempt = None
+        return BoldIdRequest
+
+    # --- Pre-flight probe: DNS + TCP + TLS handshake (non-fatal) ---  # ← NEW
+    try:
+        import socket, ssl
+        from urllib.parse import urlparse
+
+        parsed = urlparse(base_url)
+        host = parsed.hostname or parsed.path  # fallback if base_url is just host-like
+        port = parsed.port or 443
+
+        # DNS lookup
+        try:
+            socket.getaddrinfo(host, port)
+            dns_ok = True
+        except Exception as dns_e:
+            dns_ok = False
+            tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Preflight DNS lookup failed for {host}: {dns_e}")
+
+        # TCP + optional TLS handshake (quick, short timeout)
+        if dns_ok:
+            try:
+                sock = socket.create_connection((host, port), timeout=5)
+                try:
+                    # TLS handshake to ensure server accepts TLS
+                    ctx = ssl.create_default_context()
+                    ssock = ctx.wrap_socket(sock, server_hostname=host)
+                    ssock.close()
+                    tcp_tls_ok = True
+                except Exception as tls_e:
+                    tcp_tls_ok = False
+                    tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Preflight TLS handshake failed for {host}:{port}: {tls_e}")
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+            except Exception as conn_e:
+                tcp_tls_ok = False
+                tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Preflight TCP connect failed for {host}:{port}: {conn_e}")
+        else:
+            tcp_tls_ok = False
+    except Exception:
+        # If preflight tooling isn't available, don't block the request — just continue
+        tcp_tls_ok = False
+
+    # --- Debug log: show what we're about to POST (size + first header) ---  # ← NEW
+    try:
+        payload_len = len(data.encode("utf-8"))
+    except Exception:
+        payload_len = len(data)
+    tqdm.write(
+        f"{datetime.datetime.now():%H:%M:%S}: POST preflight -> host={base_url!s} params={params!s} payload_bytes={payload_len} "
+        f"first_header={fasta_header}"
+        + ("" if tcp_tls_ok else " (preflight tcp/tls failed)")
+    )
+
+    # --- Make the POST request with a prepared session and conservative retry strategy ---
     with requests_html.HTMLSession() as session:
-
         session.headers.update({
             "User-Agent": "BOLDigger3/ID-Engine",
             "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
-            "Content-Type": "text/plain;charset=utf-8",
+            # Note: files= will set multipart/form-data automatically, Content-Type header not needed here
         })
 
+        # keep urllib3 internal retries modest (we do our own retry/backoff)
         retry_strategy = Retry(total=3, backoff_factor=1)
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("https://", adapter)
 
-        # concatenate all sequences for this request
-        data = "".join(BoldIdRequest.query_data)
-        files = {"fasta_file": ("submitted.fas", data, "text/plain")}
-
         try:
             response = session.post(
-                BoldIdRequest.base_url,  # clean base URL
-                params=BoldIdRequest.params,  # query parameters here
+                base_url,               # clean base URL (no query string embedded)
+                params=params,         # params in the query string
                 files=files,
                 timeout=30,
             )
+            # parse JSON result (may raise)
             result = json.loads(response.text)
 
         except Exception as e:
-            BoldIdRequest.retry_count += 1
-            if BoldIdRequest.retry_count <= BoldIdRequest.max_retries:
+            # treat as transient by default and schedule retry/backoff
+            BoldIdRequest.retry_count = getattr(BoldIdRequest, "retry_count", 0) + 1
+            if BoldIdRequest.retry_count <= getattr(BoldIdRequest, "max_retries", 5):
                 wait_seconds = 2 ** BoldIdRequest.retry_count
                 BoldIdRequest.next_attempt = datetime.datetime.now() + datetime.timedelta(seconds=wait_seconds)
-                tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: POST failed ({e}). "
-                           f"Retry {BoldIdRequest.retry_count}/{BoldIdRequest.max_retries}; waiting {wait_seconds}s.")
+                tqdm.write(
+                    f"{datetime.datetime.now():%H:%M:%S}: POST failed ({type(e).__name__}: {e}). "
+                    f"Retry {BoldIdRequest.retry_count}/{BoldIdRequest.max_retries}; waiting {wait_seconds}s."
+                )
             else:
-                tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: POST permanently failed: {e}")
-                BoldIdRequest.next_attempt = None
-
-            return BoldIdRequest
-
-        # check result validity
-        if not isinstance(result, dict) or "sub_id" not in result:
-            BoldIdRequest.retry_count += 1
-            if BoldIdRequest.retry_count <= BoldIdRequest.max_retries:
-                wait_seconds = 2 ** BoldIdRequest.retry_count
-                BoldIdRequest.next_attempt = datetime.datetime.now() + datetime.timedelta(seconds=wait_seconds)
-                tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Invalid BOLD response. "
-                           f"Retry {BoldIdRequest.retry_count}/{BoldIdRequest.max_retries}; waiting {wait_seconds}s.")
-            else:
-                tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Invalid response permanent failure.")
+                tqdm.write(
+                    f"{datetime.datetime.now():%H:%M:%S}: POST permanently failed ({type(e).__name__}: {e})."
+                )
                 BoldIdRequest.next_attempt = None
             return BoldIdRequest
 
-        # success
-        BoldIdRequest.result_url = f"https://id.boldsystems.org/submission/results/{result['sub_id']}"
-        BoldIdRequest.timestamp = datetime.datetime.now()
-        BoldIdRequest.last_checked = None
-        BoldIdRequest.next_attempt = None
-
+    # --- Validate result structure ---
+    if not isinstance(result, dict) or "sub_id" not in result:
+        BoldIdRequest.retry_count = getattr(BoldIdRequest, "retry_count", 0) + 1
+        if BoldIdRequest.retry_count <= getattr(BoldIdRequest, "max_retries", 5):
+            wait_seconds = 2 ** BoldIdRequest.retry_count
+            BoldIdRequest.next_attempt = datetime.datetime.now() + datetime.timedelta(seconds=wait_seconds)
+            tqdm.write(
+                f"{datetime.datetime.now():%H:%M:%S}: Invalid BOLD response. "
+                f"Retry {BoldIdRequest.retry_count}/{BoldIdRequest.max_retries}; waiting {wait_seconds}s."
+            )
+        else:
+            tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Invalid response permanent failure.")
+            BoldIdRequest.next_attempt = None
         return BoldIdRequest
 
+    # ---------------- SUCCESS ----------------
+    BoldIdRequest.result_url = f"https://id.boldsystems.org/submission/results/{result['sub_id']}"
+    BoldIdRequest.timestamp = datetime.datetime.now()
+    BoldIdRequest.last_checked = None
+    BoldIdRequest.next_attempt = None
+
+    return BoldIdRequest
 
 def add_no_match(result: object, BoldIdRequest: object, fasta_order: dict) -> dict:
     """Function to add a no match in case BOLD does not return any results
@@ -985,6 +1103,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All downloads finished successfully.")
                     os.remove(download_queue_name)
                     break
+
 
 
 
