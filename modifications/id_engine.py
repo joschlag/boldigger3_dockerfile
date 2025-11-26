@@ -164,17 +164,11 @@ def already_downloaded(fasta_dict: dict, database_path: str) -> dict:
 
 
 def build_url_params(database: int, operating_mode: int) -> tuple:
-    """Function that generates a base URL and the params for the POST request to the ID engine.
-
-    Args:
-        database (int): Between 1 and 7 referring to the database, see readme for details.
-        operating_mode (int): Between 1 and 3 referring to the operating mode, see readme for details
-
-    Returns:
-        tuple: Contains the base URL as str and the params as dict
     """
-
-    # the database int is translated here
+    Returns a clean base URL (without query parameters)
+    and a params dict for the POST request.
+    """
+    # database translation
     idx_to_database = {
         1: "public.tax-derep",
         2: "species",
@@ -186,14 +180,15 @@ def build_url_params(database: int, operating_mode: int) -> tuple:
         8: "DS-IUCNPUB",
     }
 
-    # the operating mode is translated here
+    # operating mode translation
     idx_to_operating_mode = {
         1: {"mi": 0.94, "maxh": 25},
         2: {"mi": 0.9, "maxh": 50},
         3: {"mi": 0.75, "maxh": 100},
     }
 
-    # params can be calculated from the database and operating mode
+    base_url = "https://id.boldsystems.org/submission"
+
     params = {
         "db": idx_to_database[database],
         "mi": idx_to_operating_mode[operating_mode]["mi"],
@@ -201,9 +196,6 @@ def build_url_params(database: int, operating_mode: int) -> tuple:
         "maxh": idx_to_operating_mode[operating_mode]["maxh"],
         "order": 3,
     }
-
-    # format the base url
-    base_url = f"https://id.boldsystems.org/submission?db={params['db']}&mi={params['mi']}&mo={params['mo']}&maxh={params['maxh']}&order={params['order']}"
 
     return base_url, params
 
@@ -218,21 +210,21 @@ def build_download_queue(fasta_dict: dict, database: int, operating_mode: int) -
 
     Returns:
         dict: The dictionary with the download queue
-
     """
-    # Initialize queue with new retry container
+
+    # Initialize queue including retry container
     download_queue = {
         "waiting": OrderedDict(),
         "active": dict(),
-        "retry": dict(),          # ← NEW (required for patch 1+2)
+        "retry": dict(),
     }
 
-    # Build URL + params
-    base_url, params = build_url_params(database, operating_mode)
+    # Base URL + generic params
+    base_url, base_params = build_url_params(database, operating_mode)
 
     # Determine chunk size
     query_size_dict = {0.94: 1000, 0.9: 200, 0.75: 100}
-    query_size = query_size_dict[params["mi"]]
+    query_size = query_size_dict[base_params["mi"]]
 
     # Split fasta sequences into batches
     query_data = more_itertools.chunked(fasta_dict.keys(), query_size)
@@ -248,130 +240,92 @@ def build_download_queue(fasta_dict: dict, database: int, operating_mode: int) -
         bold_request = BoldIdRequest()
 
         bold_request.base_url = base_url
-        bold_request.params = params
+
+        # ⚠️ IMPORTANT: copy params so each request has its own dict
+        bold_request.params = base_params.copy()
+
         bold_request.query_data = query_generator
         bold_request.database = database
         bold_request.operating_mode = operating_mode
 
-        # ---------------------------------------------------
-        # NEW: ensure retry/backoff attributes exist
-        # (safety required by patched download_json())
-        # ---------------------------------------------------
+        # Retry / backoff fields
         bold_request.retry_count = 0
         bold_request.max_retries = 5
         bold_request.next_attempt = None
         bold_request.last_checked = None
         bold_request.timestamp = None
-        # ---------------------------------------------------
 
         download_queue["waiting"][idx] = bold_request
 
     return download_queue
 
-
 def build_post_request(BoldIdRequest: object) -> object:
-    """Function to send a POST request to the BOLD ID engine.
-
-    Integrates with the global retry system.
-    Adds:
-        - bounded retries
-        - exponential backoff
-        - next_attempt scheduling
-        - timestamp creation
+    """
+    Sends a POST request to the BOLD ID engine.
+    Preserves all fields needed for the download loop.
     """
 
-    # --- ensure retry attributes (safety) ---
-    if not hasattr(BoldIdRequest, "retry_count"):
-        BoldIdRequest.retry_count = 0
-    if not hasattr(BoldIdRequest, "max_retries"):
-        BoldIdRequest.max_retries = 5
-    if not hasattr(BoldIdRequest, "next_attempt"):
-        BoldIdRequest.next_attempt = None
+    # ensure retry/backoff attributes exist
+    for attr in ["retry_count", "max_retries", "next_attempt", "timestamp", "last_checked"]:
+        if not hasattr(BoldIdRequest, attr):
+            setattr(BoldIdRequest, attr, None if attr in ["next_attempt", "timestamp", "last_checked"] else 0)
 
     with requests_html.HTMLSession() as session:
 
-        session.headers.update(
-            {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/98.0.4758.82 Safari/537.36"
-                )
-            }
-        )
+        session.headers.update({
+            "User-Agent": "BOLDigger3/ID-Engine",
+            "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
+            "Content-Type": "text/plain;charset=utf-8",
+        })
 
-        retry_strategy = Retry(total=5, backoff_factor=1)  # keep internal retry low
+        retry_strategy = Retry(total=3, backoff_factor=1)
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("https://", adapter)
 
+        # concatenate all sequences for this request
         data = "".join(BoldIdRequest.query_data)
         files = {"fasta_file": ("submitted.fas", data, "text/plain")}
 
         try:
-            # --- attempt POST ---
             response = session.post(
-                BoldIdRequest.base_url,
-                params=BoldIdRequest.params,
+                BoldIdRequest.base_url,  # clean base URL
+                params=BoldIdRequest.params,  # query parameters here
                 files=files,
                 timeout=30,
             )
-
-            # parse JSON
             result = json.loads(response.text)
 
         except Exception as e:
-            # ----------- transient failure -----------
             BoldIdRequest.retry_count += 1
-
             if BoldIdRequest.retry_count <= BoldIdRequest.max_retries:
                 wait_seconds = 2 ** BoldIdRequest.retry_count
-                BoldIdRequest.next_attempt = datetime.datetime.now() + datetime.timedelta(
-                    seconds=wait_seconds
-                )
-                tqdm.write(
-                    f"{datetime.datetime.now():%H:%M:%S}: POST failed ({e}). "
-                    f"Retry {BoldIdRequest.retry_count}/{BoldIdRequest.max_retries}; "
-                    f"waiting {wait_seconds}s."
-                )
+                BoldIdRequest.next_attempt = datetime.datetime.now() + datetime.timedelta(seconds=wait_seconds)
+                tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: POST failed ({e}). "
+                           f"Retry {BoldIdRequest.retry_count}/{BoldIdRequest.max_retries}; waiting {wait_seconds}s.")
             else:
-                tqdm.write(
-                    f"{datetime.datetime.now():%H:%M:%S}: POST permanently failed: {e}"
-                )
-                BoldIdRequest.next_attempt = None  # stops future attempts
-
-            return BoldIdRequest
-
-        # --- if JSON is malformed or contains an error ---
-        if not isinstance(result, dict) or "sub_id" not in result:
-            BoldIdRequest.retry_count += 1
-
-            if BoldIdRequest.retry_count <= BoldIdRequest.max_retries:
-                wait_seconds = 2 ** BoldIdRequest.retry_count
-                BoldIdRequest.next_attempt = datetime.datetime.now() + datetime.timedelta(
-                    seconds=wait_seconds
-                )
-
-                tqdm.write(
-                    f"{datetime.datetime.now():%H:%M:%S}: Invalid BOLD response. "
-                    f"Retry {BoldIdRequest.retry_count}/{BoldIdRequest.max_retries}; "
-                    f"waiting {wait_seconds}s."
-                )
-            else:
-                tqdm.write(
-                    f"{datetime.datetime.now():%H:%M:%S}: Invalid response permanent failure."
-                )
+                tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: POST permanently failed: {e}")
                 BoldIdRequest.next_attempt = None
 
             return BoldIdRequest
 
-        # ---------------- SUCCESS ----------------
-        BoldIdRequest.result_url = (
-            f"https://id.boldsystems.org/submission/results/{result['sub_id']}"
-        )
+        # check result validity
+        if not isinstance(result, dict) or "sub_id" not in result:
+            BoldIdRequest.retry_count += 1
+            if BoldIdRequest.retry_count <= BoldIdRequest.max_retries:
+                wait_seconds = 2 ** BoldIdRequest.retry_count
+                BoldIdRequest.next_attempt = datetime.datetime.now() + datetime.timedelta(seconds=wait_seconds)
+                tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Invalid BOLD response. "
+                           f"Retry {BoldIdRequest.retry_count}/{BoldIdRequest.max_retries}; waiting {wait_seconds}s.")
+            else:
+                tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Invalid response permanent failure.")
+                BoldIdRequest.next_attempt = None
+            return BoldIdRequest
 
+        # success
+        BoldIdRequest.result_url = f"https://id.boldsystems.org/submission/results/{result['sub_id']}"
         BoldIdRequest.timestamp = datetime.datetime.now()
         BoldIdRequest.last_checked = None
-        BoldIdRequest.next_attempt = None  # clear backoff
+        BoldIdRequest.next_attempt = None
 
         return BoldIdRequest
 
@@ -1031,6 +985,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All downloads finished successfully.")
                     os.remove(download_queue_name)
                     break
+
 
 
 
