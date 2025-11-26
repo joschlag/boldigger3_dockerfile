@@ -595,31 +595,76 @@ def parse_and_save_data(
 
 #                     # return the active queue
 #                     return active_queue
-
-def log_failed_request(req, request_id, fasta_order, project_directory, reason):
+def log_failed_request(req, key, fasta_order, project_directory, reason):
     """
-    Log permanently failed requests to failed_requests.log.
-    Includes FASTA header and sequence.
+    Log any request that permanently failed (POST or GET).
+    Always safe: never references undefined attributes.
+
+    Produces:
+        failed_requests.log  (append mode)
+        failed_fasta/        (FASTA sequences of failed entries)
     """
 
-    log_path = project_directory.joinpath("boldigger3_data", "failed_requests.log")
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_path = project_directory.joinpath("failed_requests.log")
+    failed_fasta_dir = project_directory.joinpath("failed_fasta")
+    failed_fasta_dir.mkdir(exist_ok=True)
 
-    # req holds fasta_header and sequence because build_post_request attaches them
-    fasta_header = getattr(req, "fasta_header", "UNKNOWN_HEADER")
-    sequence = getattr(req, "sequence", "UNKNOWN_SEQUENCE")
+    # --- Extract available URLs safely ---
+    base_url = getattr(req, "base_url", "N/A")
+    result_url = getattr(req, "result_url", "N/A")
 
-    with open(log_path, "a", encoding="utf-8") as logfile:
-        logfile.write(
-            f"==== FAILED REQUEST ====\n"
-            f"Timestamp: {now}\n"
-            f"Request ID: {request_id}\n"
-            f"Reason: {reason}\n"
-            f"FASTA Header: {fasta_header}\n"
-            f"Sequence: {sequence}\n"
-            f"------------------------\n\n"
-        )
+    # --- Extract sequence safely ---
+    seq = None
+    if hasattr(req, "query_data") and req.query_data:
+        # req.query_data is a list of FASTA lines
+        seq = "".join(req.query_data).strip()
+    else:
+        seq = "NO_SEQUENCE_FOUND"
 
+    # --- Extract original FASTA header if possible ---
+    fasta_header = fasta_order.get(key, "UNKNOWN_FASTA_ENTRY")
+
+    # --- Build a failure classification line ---
+    classification = "UNKNOWN"
+    if "POST" in reason.upper():
+        classification = "POST_FAILURE"
+    elif "HTTP" in reason.upper():
+        classification = "HTTP_ERROR"
+    elif "TIMEOUT" in reason.upper():
+        classification = "TIMEOUT"
+    elif "JSON" in reason.upper():
+        classification = "INVALID_JSON"
+    elif "EMPTY" in reason.upper():
+        classification = "EMPTY_RESPONSE"
+
+    # === Write to failed_requests.log ===
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write("\n" + "="*80 + "\n")
+        f.write(f"Timestamp: {datetime.datetime.now()}\n")
+        f.write(f"Request ID: {key}\n")
+        f.write(f"FASTA Header: {fasta_header}\n")
+        f.write(f"Failure Reason: {reason}\n")
+        f.write(f"Classification: {classification}\n")
+
+        f.write("\n--- URLs ---\n")
+        f.write(f"Submission URL (POST): {base_url}\n")
+        f.write(f"Result URL (GET):      {result_url}\n")
+
+        f.write("\n--- Retry Status ---\n")
+        f.write(f"Retry Count: {getattr(req, 'retry_count', 'N/A')}\n")
+        f.write(f"Max Retries: {getattr(req, 'max_retries', 'N/A')}\n")
+        f.write(f"Next Attempt: {getattr(req, 'next_attempt', 'N/A')}\n")
+        f.write(f"Timestamp First Seen: {getattr(req, 'timestamp', 'N/A')}\n")
+
+        f.write("\n--- Query Data (FASTA) ---\n")
+        f.write(seq + "\n")
+
+    # Also save the failed FASTA sequence for re-submission
+    failed_fasta_path = failed_fasta_dir.joinpath(f"{key}.fas")
+    with open(failed_fasta_path, "w", encoding="utf-8") as f:
+        f.write(seq)
+
+    return
 
 def download_json(
         active_queue: dict,
@@ -986,6 +1031,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All downloads finished successfully.")
                     os.remove(download_queue_name)
                     break
+
 
 
 
