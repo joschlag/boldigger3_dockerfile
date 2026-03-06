@@ -223,7 +223,7 @@ def build_download_queue(fasta_dict: dict, database: int, operating_mode: int) -
     base_url, base_params = build_url_params(database, operating_mode)
 
     # Determine chunk size
-    query_size_dict = {0.94: 1000, 0.9: 200, 0.75: 100}
+    query_size_dict = {0.94: 400, 0.9: 200, 0.75: 100}
     query_size = query_size_dict[base_params["mi"]]
 
     # Split fasta sequences into batches
@@ -607,65 +607,6 @@ def parse_and_save_data(
     id_engine_result.to_parquet(output_file)
 
 
-# def download_json(
-#     active_queue: dict, fasta_order: dict, project_directory: str, fasta_name: str,
-# ):
-#     """Function to download the JSON results from the id engine and store them in temporary parquet files.
-
-#     Args:
-#         active_queue (dict): Queue with active BOLD requests.
-#         fasta_order (dict): Dict that can be appended to the results. Needed for creating a sorted duckdb table later.
-#     """
-#     # initialize the last check's for the active queue
-#     for key in active_queue.keys():
-#         if not active_queue[key].last_checked:
-#             active_queue[key].last_checked = datetime.datetime.now()
-
-#     # check the requests every ten seconds
-#     with requests_html.HTMLSession() as session:
-#         # loop over the active queue until any request is finished
-#         while active_queue:
-#             for key in active_queue.keys():
-#                 now = datetime.datetime.now()
-#                 # check the timestamp of the key, if it is older than 10 minutes, pop it from the active
-#                 # queue to fetch it in a later run
-#                 if now - active_queue[key].timestamp > datetime.timedelta(minutes=15):
-#                     tqdm.write(
-#                         f"{datetime.datetime.now().strftime('%H:%M:%S')}: Request ID {key} has timed out. Will be requeued."
-#                     )
-#                     active_queue.pop(key)
-#                     return active_queue
-
-#                 # if the url has not been checked in the last 10 seconds, check again, else skip the url
-#                 if now - active_queue[key].last_checked > datetime.timedelta(
-#                     seconds=15
-#                 ):
-#                     response = session.get(active_queue[key].result_url)
-#                 else:
-#                     continue
-#                 # if there's no data in the response yet, continue
-#                 if response.status_code == 404:
-#                     active_queue[key].last_checked = datetime.datetime.now()
-#                     continue
-#                 # if timing is sufficient AND data in the response, parse the response
-#                 else:
-#                     # parse the response here and save, update the active queue
-#                     parse_and_save_data(
-#                         active_queue[key],
-#                         response,
-#                         fasta_order,
-#                         key,
-#                         project_directory,
-#                         fasta_name,
-#                     )
-#                     active_queue.pop(key)
-
-#                     # give user output
-#                     tqdm.write(
-#                         f"{datetime.datetime.now().strftime('%H:%M:%S')}: Request ID {key} has successfully been downloaded."
-#                     )
-
-#                     # return the active queue
 #                     return active_queue
 def log_failed_request(req, key, fasta_order, project_directory, reason):
     """
@@ -1004,6 +945,9 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
     data_dir = project_directory.joinpath("boldigger3_data")
     data_dir.mkdir(exist_ok=True)
 
+    # REQUIRED BY BOLD API guidelines (6 seconds)
+    submission_delay = 6
+
     # Check for prior downloads
     fasta_dict = already_downloaded(fasta_dict, database_path)
     if not fasta_dict:
@@ -1060,6 +1004,9 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                         )
                         download_queue["active"][request_id] = build_post_request(req_obj)
 
+                        # REQUIRED BY BOLD API guidelines
+                        time.sleep(submission_delay)
+
                     else:
                         # Update active queue and remove completed requests
                         before = len(download_queue["active"])
@@ -1074,9 +1021,15 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
 
                         # Only advance the progress bar for actual completed downloads
                         finished_now = before - after
-                        if finished_now > 0:
-                            pbar.update(finished_now)
-
+                        #if finished_now > 0:
+                        #    pbar.update(finished_now)
+                        # Adaptive throttling
+                        if finished_now == 0:
+                            submission_delay = min(submission_delay + 2, 30)
+                        else:
+                            submission_delay = max(6, submission_delay - 1)
+                        # NEW: avoid spamming GET requests
+                        time.sleep(1)    
                     # Persist queue every loop
                     with open(download_queue_name, "wb") as out_stream:
                         pickle.dump(download_queue, out_stream)
@@ -1103,19 +1056,3 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All downloads finished successfully.")
                     os.remove(download_queue_name)
                     break
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
