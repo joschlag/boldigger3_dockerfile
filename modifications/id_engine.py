@@ -223,7 +223,7 @@ def build_download_queue(fasta_dict: dict, database: int, operating_mode: int) -
     base_url, base_params = build_url_params(database, operating_mode)
 
     # Determine chunk size
-    query_size_dict = {0.94: 400, 0.9: 200, 0.75: 100}
+    query_size_dict = {0.94: 250, 0.9: 150, 0.75: 75}
     query_size = query_size_dict[base_params["mi"]]
 
     # Split fasta sequences into batches
@@ -1056,3 +1056,4 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                     tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All downloads finished successfully.")
                     os.remove(download_queue_name)
                     break
+
