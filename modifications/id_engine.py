@@ -981,9 +981,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
     # -------- NEW: split sequences into 5000-sequence batches --------
     batches = list(split_into_batches(fasta_dict, 5000))
 
-    log("INFO", f"{len(batches)} batches detected (≤5000 sequences each), this is an old log!!!")
     log("INFO", f"Number of batches created: {len(batches)}")
-
 
     # -------- NEW: process batches sequentially --------
     for batch_index, batch_dict in enumerate(batches, start=1):
@@ -1088,5 +1086,6 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                         if os.path.exists(download_queue_name):
                             os.remove(download_queue_name)
                         break
+
 
 
