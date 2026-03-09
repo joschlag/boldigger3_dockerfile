@@ -1061,24 +1061,26 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
 
         min_batch_duration = datetime.timedelta(minutes=MIN_BATCH_MINUTES)
         batch_elapsed = datetime.datetime.now() - batch_start_time
-
-        if batch_elapsed < min_batch_duration:
-
+        
+        # Only enforce wait if another batch follows
+        if batch_index < len(batches) and batch_elapsed < min_batch_duration:
+        
             wait_time = (min_batch_duration - batch_elapsed).total_seconds()
-
+        
             log(
                 "BATCH",
-                f"Batch {batch_index} finished early ({batch_elapsed}), waiting {int(wait_time)}s to enforce minimum runtime"
+                f"Batch {batch_index} finished early ({batch_elapsed}), waiting {int(wait_time)}s before next batch"
             )
-
+        
             time.sleep(wait_time)
-
+        
         else:
-
-            log("BATCH", f"Batch {batch_index} took {batch_elapsed}, no wait needed")
+        
+            log("BATCH", f"Batch {batch_index} runtime: {batch_elapsed}")
 
         log("BATCH", f"Batch {batch_index} completed")
                 
+
 
 
 
