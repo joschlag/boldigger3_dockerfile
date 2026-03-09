@@ -232,6 +232,9 @@ def build_download_queue(fasta_dict: dict, database: int, operating_mode: int) -
     query_size_dict = {0.94: 250, 0.9: 150, 0.75: 75}
     query_size = query_size_dict[base_params["mi"]]
 
+    log("QUEUE", f"Sequences received for queue: {len(fasta_dict)}")
+    log("QUEUE", f"Sequences per POST request: {query_size}")
+    
     # Split fasta sequences into batches
     query_data = more_itertools.chunked(fasta_dict.keys(), query_size)
 
@@ -241,6 +244,7 @@ def build_download_queue(fasta_dict: dict, database: int, operating_mode: int) -
         for query_subset in query_data
     )
 
+    log("QUEUE", f"Creating POST requests")
     # Build request objects
     for idx, query_generator in enumerate(query_generators, start=1):
         bold_request = BoldIdRequest()
@@ -912,8 +916,9 @@ def parquet_to_duckdb(project_directory, database_path):
             con.execute(
                 f"""
                 CREATE TABLE id_engine_results AS
-                SELECT * FROM read_parquet([{parquet_list}])
+                SELECT * FROM read_parquet([{parquet_paths}])
                 """
+                #SELECT * FROM read_parquet([{parquet_list}])
             )
         else:
             # Insert into existing table
@@ -948,6 +953,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
     """Main function to run the BOLD identification engine."""
 
     log("INFO", "Reading input FASTA")
+    log("DEBUG", "TEST LOG MESSAGE")
 
     fasta_dict, fasta_name, project_directory = parse_fasta(fasta_path)
     fasta_dict_order = {key: idx for idx, key in enumerate(fasta_dict.keys())}
@@ -966,6 +972,8 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
     # Check for prior downloads
     fasta_dict = already_downloaded(fasta_dict, database_path)
 
+    log("INFO", f"Sequences remaining after filtering: {len(fasta_dict)}")
+    
     if not fasta_dict:
         tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All data has already been downloaded.")
         return None
@@ -973,13 +981,16 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
     # -------- NEW: split sequences into 5000-sequence batches --------
     batches = list(split_into_batches(fasta_dict, 5000))
 
-    log("INFO", f"{len(batches)} batches detected (≤5000 sequences each)")
+    log("INFO", f"{len(batches)} batches detected (≤5000 sequences each), this is an old log!!!")
+    log("INFO", f"Number of batches created: {len(batches)}")
 
 
     # -------- NEW: process batches sequentially --------
     for batch_index, batch_dict in enumerate(batches, start=1):
 
-        log("BATCH", f"Starting batch {batch_index}/{len(batches)} ({len(batch_dict)} sequences)")
+        #log("BATCH", f"Starting batch {batch_index}/{len(batches)} ({len(batch_dict)} sequences)")
+        log("BATCH", f"Starting batch {batch_index}/{len(batches)}")
+        log("BATCH", f"Batch {batch_index} size: {len(batch_dict)} sequences")
 
         batch_start_time = datetime.datetime.now()
 
@@ -1077,4 +1088,5 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                         if os.path.exists(download_queue_name):
                             os.remove(download_queue_name)
                         break
+
 
