@@ -6,10 +6,9 @@ from tqdm import tqdm
 from collections import OrderedDict
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from boldigger3.exceptions import DownloadFinished
 from json.decoder import JSONDecodeError
 from requests.exceptions import ReadTimeout
-
+#from boldigger3.exceptions import DownloadFinished
 
 def log(level: str, message: str):
     """Simple logging function that writes to tqdm output with timestamp."""
@@ -978,20 +977,19 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
     fasta_dict = already_downloaded(fasta_dict, database_path)
 
     log("INFO", f"Sequences remaining after filtering: {len(fasta_dict)}")
-    
+
     if not fasta_dict:
         tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: All data has already been downloaded.")
         return None
 
-    # -------- NEW: split sequences into 5000-sequence batches --------
+    # -------- split sequences into 5000-sequence batches --------
     batches = list(split_into_batches(fasta_dict, 5000))
 
     log("INFO", f"Number of batches created: {len(batches)}")
 
-    # -------- NEW: process batches sequentially --------
+    # -------- process batches sequentially --------
     for batch_index, batch_dict in enumerate(batches, start=1):
 
-        #log("BATCH", f"Starting batch {batch_index}/{len(batches)} ({len(batch_dict)} sequences)")
         log("BATCH", f"Starting batch {batch_index}/{len(batches)}")
         log("BATCH", f"Batch {batch_index} size: {len(batch_dict)} sequences")
 
@@ -1000,97 +998,88 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
         download_queue = build_download_queue(batch_dict, database, operating_mode)
         download_queue["retry"] = OrderedDict()
 
-        total_downloads = len(download_queue["waiting"])
+        total_downloads = len(download_queue["waiting"]) + len(download_queue["active"])
 
         # ------------------- MAIN DOWNLOAD LOOP -------------------
-        with tqdm(total=total_downloads, desc="Finished downloads") as pbar:
-            while True:
-                try:
-                    if download_queue["waiting"] or download_queue["active"] or download_queue["retry"]:
+        with tqdm(total=total_downloads, desc=f"Batch {batch_index} downloads") as pbar:
 
-                        # Move retry items back to waiting if nothing is waiting
-                        if not download_queue["waiting"] and download_queue["retry"]:
+            while download_queue["waiting"] or download_queue["active"] or download_queue["retry"]:
 
-                            log("QUEUE", f"Requeueing {len(download_queue['retry'])} retry jobs")
+                # Move retry items back to waiting if nothing is waiting
+                if not download_queue["waiting"] and download_queue["retry"]:
 
-                            for key, req in list(download_queue["retry"].items()):
-                                download_queue["waiting"][key] = req
-                                del download_queue["retry"][key]
+                    log("QUEUE", f"Requeueing {len(download_queue['retry'])} retry jobs")
 
-                        # Fill active queue up to four jobs
-                        if len(download_queue["active"]) < 4 and download_queue["waiting"]:
-                            request_id, req_obj = download_queue["waiting"].popitem(last=False)
+                    for key, req in list(download_queue["retry"].items()):
+                        download_queue["waiting"][key] = req
+                        del download_queue["retry"][key]
 
-                            log("QUEUE", f"Request {request_id} → ACTIVE")
+                # Fill active queue up to four jobs
+                if len(download_queue["active"]) < 4 and download_queue["waiting"]:
 
-                            download_queue["active"][request_id] = build_post_request(req_obj)
+                    request_id, req_obj = download_queue["waiting"].popitem(last=False)
 
-                            # REQUIRED BY BOLD API guidelines
-                            time.sleep(submission_delay)
+                    log("QUEUE", f"Request {request_id} → ACTIVE")
 
-                        else:
-                            # Update active queue and remove completed requests
-                            before = len(download_queue["active"])
-                            download_queue["active"] = download_json(
-                                download_queue["active"],
-                                fasta_dict_order,
-                                project_directory,
-                                fasta_name,
-                                download_queue["retry"],
-                            )
-                            after = len(download_queue["active"])
+                    download_queue["active"][request_id] = build_post_request(req_obj)
 
-                            # Only advance the progress bar for actual completed downloads
-                            finished_now = before - after
+                    # REQUIRED BY BOLD API guidelines
+                    time.sleep(submission_delay)
 
-                            if finished_now > 0:
-                                pbar.update(finished_now)
+                else:
 
-                            if finished_now == 0:
-                                submission_delay = min(submission_delay + 2, 30)
-                            else:
-                                submission_delay = max(6, submission_delay - 1)
-                            # NEW: avoid spamming GET requests
-                            time.sleep(1)    
+                    # Update active queue and remove completed requests
+                    before = len(download_queue["active"])
 
+                    download_queue["active"] = download_json(
+                        download_queue["active"],
+                        fasta_dict_order,
+                        project_directory,
+                        fasta_name,
+                        download_queue["retry"],
+                    )
 
+                    after = len(download_queue["active"])
+
+                    finished_now = before - after
+
+                    if finished_now > 0:
+                        pbar.update(finished_now)
+
+                    # Adaptive delay
+                    if finished_now == 0:
+                        submission_delay = min(submission_delay + 2, 30)
                     else:
-                        parquet_to_duckdb(project_directory, database_path)
-                        raise DownloadFinished
+                        submission_delay = max(6, submission_delay - 1)
 
-                except DownloadFinished:
-                    fasta_dict = already_downloaded(fasta_dict, database_path)
+                    # Avoid spamming GET requests
+                    time.sleep(1)
 
+        # ---------------- Batch finished ----------------
 
-                    # ---------------- Minimum batch duration enforcement ----------------
-                    min_batch_duration = datetime.timedelta(minutes=MIN_BATCH_MINUTES)
-                    batch_elapsed = datetime.datetime.now() - batch_start_time
-                    if batch_elapsed < min_batch_duration:
-                        wait_time = (min_batch_duration - batch_elapsed).total_seconds()
-                        log("BATCH", f"Batch {batch_index} finished early ({batch_elapsed}), waiting {int(wait_time)}s to enforce 30 min minimum")
-                        time.sleep(wait_time)
-                    else:
-                        log("BATCH", f"Batch {batch_index} took {batch_elapsed}, no wait needed")
-                    # -------------------------------------------------------------------------
+        parquet_to_duckdb(project_directory, database_path)
 
-                    if fasta_dict:
-                        tqdm.write(f"{datetime.datetime.now():%H:%M:%S}: Requeuing incomplete downloads.")
+        min_batch_duration = datetime.timedelta(minutes=MIN_BATCH_MINUTES)
+        batch_elapsed = datetime.datetime.now() - batch_start_time
 
-                        download_queue = build_download_queue(fasta_dict, database, operating_mode)
-                        download_queue["retry"] = OrderedDict()
+        if batch_elapsed < min_batch_duration:
 
-                        total_downloads = len(download_queue["active"]) + len(download_queue["waiting"])
-                        pbar.reset()
-                        pbar.total = total_downloads
-                        pbar.refresh()
+            wait_time = (min_batch_duration - batch_elapsed).total_seconds()
 
-                    else:
-                        log("DONE", "All downloads finished successfully")
+            log(
+                "BATCH",
+                f"Batch {batch_index} finished early ({batch_elapsed}), waiting {int(wait_time)}s to enforce minimum runtime"
+            )
 
-                        # os.remove(download_queue_name)
-                        if os.path.exists(download_queue_name):
-                            os.remove(download_queue_name)
-                        break
+            time.sleep(wait_time)
+
+        else:
+
+            log("BATCH", f"Batch {batch_index} took {batch_elapsed}, no wait needed")
+
+        log("BATCH", f"Batch {batch_index} completed")
+                
+
 
 
 
