@@ -912,7 +912,7 @@ def parquet_to_duckdb(project_directory, database_path):
         if not table_exists:
             # First insert: create table from parquet files
             #parquet_paths = [str(f) for f in parquet_files]
-            parquet_list = ", ".join(f"'{str(f)}'" for f in parquet_files)
+            parquet_paths = ", ".join(f"'{str(f)}'" for f in parquet_files)
             con.execute(
                 f"""
                 CREATE TABLE id_engine_results AS
@@ -1086,6 +1086,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                         if os.path.exists(download_queue_name):
                             os.remove(download_queue_name)
                         break
+
 
 
 
