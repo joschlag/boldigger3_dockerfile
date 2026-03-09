@@ -916,10 +916,15 @@ def parquet_to_duckdb(project_directory, database_path):
             con.execute(
                 f"""
                 CREATE TABLE id_engine_results AS
-                SELECT * FROM read_parquet([{parquet_paths}])
-                """
+                SELECT * FROM read_parquet('{data_dir}/request_id_*.parquet.snappy')
+                """)
+            #con.execute(
+                #f"""
+                #CREATE TABLE id_engine_results AS
+                #SELECT * FROM read_parquet([{parquet_paths}])
+                #"""
                 #SELECT * FROM read_parquet([{parquet_list}])
-            )
+            #)
         else:
             # Insert into existing table
             for file in parquet_files:
@@ -1086,6 +1091,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
                         if os.path.exists(download_queue_name):
                             os.remove(download_queue_name)
                         break
+
 
 
 
