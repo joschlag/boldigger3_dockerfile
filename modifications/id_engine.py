@@ -998,59 +998,59 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
         download_queue["retry"] = OrderedDict()
 
         total_downloads = len(download_queue["waiting"]) + len(download_queue["active"])
-# ------------------- MAIN DOWNLOAD LOOP -------------------
-with tqdm(total=total_downloads, desc=f"Batch {batch_index} downloads") as pbar:
-
-    while download_queue["waiting"] or download_queue["active"] or download_queue["retry"]:
-
-        # Move retry items back to waiting if backoff elapsed
-        if download_queue["retry"]:
-            now = datetime.datetime.now()
-            for key, req in list(download_queue["retry"].items()):
-                if not req.next_attempt or now >= req.next_attempt:
-                    download_queue["waiting"][key] = req
-                    del download_queue["retry"][key]
-
-        # Fill active queue up to four jobs (FIFO)
-        while len(download_queue["active"]) < 4 and download_queue["waiting"]:
-
-            request_id, req_obj = download_queue["waiting"].popitem(last=False)  # FIFO
-
-            log("QUEUE", f"Request {request_id} → ACTIVE")
-
-            download_queue["active"][request_id] = build_post_request(req_obj)
-
-            # REQUIRED BY BOLD API guidelines
-            time.sleep(submission_delay)
-
-        else:
-
-            # Update active queue and remove completed requests
-            before = len(download_queue["active"])
-
-            download_queue["active"] = download_json(
-                download_queue["active"],
-                fasta_dict_order,
-                project_directory,
-                fasta_name,
-                download_queue["retry"],
-            )
-
-            after = len(download_queue["active"])
-
-            finished_now = before - after
-
-            if finished_now > 0:
-                pbar.update(finished_now)
-
-            # Adaptive delay
-            if finished_now == 0:
-                submission_delay = min(submission_delay + 2, 30)
-            else:
-                submission_delay = max(6, submission_delay - 1)
-
-            # Avoid spamming GET requests
-            time.sleep(1)
+        # ------------------- MAIN DOWNLOAD LOOP -------------------
+        with tqdm(total=total_downloads, desc=f"Batch {batch_index} downloads") as pbar:
+        
+            while download_queue["waiting"] or download_queue["active"] or download_queue["retry"]:
+        
+                # Move retry items back to waiting if backoff elapsed
+                if download_queue["retry"]:
+                    now = datetime.datetime.now()
+                    for key, req in list(download_queue["retry"].items()):
+                        if not req.next_attempt or now >= req.next_attempt:
+                            download_queue["waiting"][key] = req
+                            del download_queue["retry"][key]
+        
+                # Fill active queue up to four jobs (FIFO)
+                while len(download_queue["active"]) < 4 and download_queue["waiting"]:
+        
+                    request_id, req_obj = download_queue["waiting"].popitem(last=False)  # FIFO
+        
+                    log("QUEUE", f"Request {request_id} → ACTIVE")
+        
+                    download_queue["active"][request_id] = build_post_request(req_obj)
+        
+                    # REQUIRED BY BOLD API guidelines
+                    time.sleep(submission_delay)
+        
+                else:
+        
+                    # Update active queue and remove completed requests
+                    before = len(download_queue["active"])
+        
+                    download_queue["active"] = download_json(
+                        download_queue["active"],
+                        fasta_dict_order,
+                        project_directory,
+                        fasta_name,
+                        download_queue["retry"],
+                    )
+        
+                    after = len(download_queue["active"])
+        
+                    finished_now = before - after
+        
+                    if finished_now > 0:
+                        pbar.update(finished_now)
+        
+                    # Adaptive delay
+                    if finished_now == 0:
+                        submission_delay = min(submission_delay + 2, 30)
+                    else:
+                        submission_delay = max(6, submission_delay - 1)
+        
+                    # Avoid spamming GET requests
+                    time.sleep(1)
 
         # ---------------- Batch finished ----------------
 
@@ -1077,6 +1077,7 @@ with tqdm(total=total_downloads, desc=f"Batch {batch_index} downloads") as pbar:
 
         log("BATCH", f"Batch {batch_index} completed")
                 
+
 
 
 
