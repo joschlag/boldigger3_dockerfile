@@ -200,6 +200,11 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
     Returns:
         object: Single line dataframe with the selected top hit
     """
+
+    iteration = 0
+    # safety limit to avoid infinite loops
+    max_iterations = 20  
+
     # get the thrshold and taxonomic level
     threshold, level = get_threshold(hits_for_id, thresholds)
 
@@ -245,119 +250,93 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
 
         return return_value
 
+    
+    # define the levels for the groupby. care about the selector string later
+    all_levels = ["phylum", "class", "order", "family", "genus", "species"]
     # go through the hits to make the selection
-    while True:
+    while iteration < max_iterations:
+        iteration += 1
         # copy the hits to perform modifications
-        hits_above_similarity = hits_for_id.copy()
+        hits_above_similarity = hits_for_id[hits_for_id["pct_identity"] > threshold].copy()
 
-        # select the hits above similarity
-        hits_above_similarity = hits_above_similarity.loc[
-            hits_above_similarity["pct_identity"] > threshold
-        ]
-
-        # define the levels for the groupby. care about the selector string later
-        all_levels = ["phylum", "class", "order", "family", "genus", "species"]
         levels = all_levels[: all_levels.index(level) + 1]
-
-        # only select levels of interest
+        # select the hits above similarity and of interest
         hits_above_similarity = hits_above_similarity[levels].copy()
-
-        # group hits by level and then count the appearence
-        hits_above_similarity = pd.DataFrame(
+        hits_above_similarity = (
             hits_above_similarity.groupby(by=levels, sort=False, dropna=False)
             .size()
             .reset_index(name="count")
         )
+        hits_above_similarity = hits_above_similarity.dropna(subset=[level], axis=0)
+        # if nothing left, move threshold up safely
+        if len(hits_above_similarity) == 0:
+            try:
+                threshold, level = move_threshold_up(threshold, thresholds)
+                continue
+            except IndexError:
+                # reached topmost threshold, return first row safely
+                print(f"[WARN] ID {hits_for_id['id'].iloc[0]} reached max threshold without hits")
+                return hits_for_id.head(1)
 
-        # drop nas at the selected level
-        hits_above_similarity = hits_above_similarity.dropna(subset=level, axis=0)
+        # select top hit
+        hits_above_similarity = hits_above_similarity.sort_values(by="count", ascending=False)
+        top_hit_row = hits_above_similarity.iloc[0]
+        top_count = top_hit_row["count"]
+        top_ratio = top_count / hits_above_similarity["count"].sum()
 
-        # if there's nothing left, move the threshold up and continue to search
-        if len(hits_above_similarity.index) == 0:
-            threshold, level = move_threshold_up(threshold, thresholds)
-            continue
+        # build query string for the top hit
+        query_parts = []
+        for col in top_hit_row.index[:-1]:  # skip 'count'
+            val = str(top_hit_row[col]).replace("'", "''")  # escape single quotes
+            query_parts.append(f"`{col}` == '{val}'")
+        query_string = " and ".join(query_parts)
 
-        # sort by count
-        hits_above_similarity = hits_above_similarity.sort_values(
-            by="count", ascending=False
-        )
-
-        # select the top hit and its count
-        top_hit, top_count, top_ratio = (
-            hits_above_similarity.head(1),
-            hits_above_similarity.head(1)["count"].item(),
-            hits_above_similarity.head(1)["count"].item()
-            / hits_above_similarity["count"].sum(),
-        )
-
-        # drop all columns with na values to not pollute the query string
-        top_hit = top_hit.dropna(axis=1).drop(labels="count", axis=1)
-
-        # create a query string
-        query_string = [
-            f"`{level}` == '{top_hit[level].item()}'" for level in top_hit.columns
-        ]
-        query_string = " and ".join(query_string)
-
-        # query for the top hits
         top_hits = hits_for_id.query(query_string)
 
-        # collect the bins from the selected top hit
-        if threshold == thresholds[0]:
-            top_hit_bins = top_hits["bin_uri"].dropna().unique()
-        else:
-            top_hit_bins = []
+        # collect BINs
+        top_hit_bins = top_hits["bin_uri"].dropna().unique() if threshold == thresholds[0] else []
 
-        # select the first match from the top hits table as the top hit
         final_top_hit = top_hits.head(1).copy()
-
-        # add the record count to the top hit
         final_top_hit["records"] = top_count
         final_top_hit["records_ratio"] = top_ratio
-
-        # add the selected level
         final_top_hit["selected_level"] = level
-
-        # add the BINs to the top hit
         final_top_hit["BIN"] = "|".join(top_hit_bins)
 
-        # remove information that is higher then the selected level if neccesarry
+        # remove higher-level info if threshold < top
         if threshold != thresholds[0]:
-            # get the index of the selected level
             idx = all_levels.index(level)
             levels_to_remove = all_levels[idx + 1 :]
             final_top_hit[levels_to_remove] = pd.NA
-            final_top_hit[levels_to_remove] = final_top_hit[levels_to_remove].astype(
-                "string"
-            )
-            break
-        break
+            final_top_hit[levels_to_remove] = final_top_hit[levels_to_remove].astype("string")
 
-    # add flags to the hits
-    final_top_hit["flags"] = flag_hits(top_hits, final_top_hit)
+        final_top_hit["flags"] = flag_hits(top_hits, final_top_hit)
 
-    # only select the data relevant for output
-    final_top_hit = final_top_hit[
-        [
-            "id",
-            "phylum",
-            "class",
-            "order",
-            "family",
-            "genus",
-            "species",
-            "pct_identity",
-            "status",
-            "records",
-            "records_ratio",
-            "selected_level",
-            "BIN",
-            "flags",
-            "fasta_order",
+        # select relevant columns
+        final_top_hit = final_top_hit[
+            [
+                "id",
+                "phylum",
+                "class",
+                "order",
+                "family",
+                "genus",
+                "species",
+                "pct_identity",
+                "status",
+                "records",
+                "records_ratio",
+                "selected_level",
+                "BIN",
+                "flags",
+                "fasta_order",
+            ]
         ]
-    ]
+        return final_top_hit
 
-    return final_top_hit
+    # fallback if max iterations reached
+    print(f"[WARN] ID {hits_for_id['id'].iloc[0]} exceeded max iterations")
+    return hits_for_id.head(1)
+
 
 
 def gather_top_hits(
@@ -368,22 +347,27 @@ def gather_top_hits(
     buffer_counter = 0
 
     with duckdb.connect(id_engine_db_path) as connection:
-        # extract the data per query from duckdb
-        for query in tqdm(fasta_dict.keys(), desc="Top hit calculation"):
-            sql_query = f"SELECT * FROM final_results WHERE id='{query}' ORDER BY fasta_order ASC, pct_identity DESC"
-            query = clean_dataframe(connection.execute(sql_query).df())
-            # find the top hit
-            top_hits_buffer.append(find_top_hit(query, thresholds))
-            # spill to parquet whenever there are 1k hits in the buffer, ingest parquet later for saving
+        for query_id in tqdm(fasta_dict.keys(), desc="Top hit calculation"):
+            sql_query = f"SELECT * FROM final_results WHERE id='{query_id}' ORDER BY fasta_order ASC, pct_identity DESC"
+            hits_for_id = clean_dataframe(connection.execute(sql_query).df())
+
+            if hits_for_id.empty:
+                print(f"[WARN] No hits found for ID: {query_id}")
+                continue
+
+            try:
+                top_hits_buffer.append(find_top_hit(hits_for_id, thresholds))
+            except Exception as e:
+                print(f"[ERROR] Failed processing ID {query_id}: {e}")
+                continue
+
+            # flush buffer
             if len(top_hits_buffer) >= 1_000:
                 parquet_output = project_directory.joinpath(
                     "boldigger3_data",
-                    f"{fasta_name}_top_hit_buffer_{buffer_counter}.parquet.snappy",
+                    f"{fasta_name}_top_hit_buffer_{buffer_counter}.parquet.snappy"
                 )
-                top_hits_buffer = pd.concat(top_hits_buffer, axis=0).reset_index(
-                    drop=True
-                )
-                top_hits_buffer.to_parquet(parquet_output)
+                pd.concat(top_hits_buffer, axis=0).reset_index(drop=True).to_parquet(parquet_output)
                 buffer_counter += 1
                 top_hits_buffer = []
 
@@ -393,9 +377,9 @@ def gather_top_hits(
                 "boldigger3_data",
                 f"{fasta_name}_top_hit_buffer_{buffer_counter}.parquet.snappy",
             )
-
-            top_hits_buffer = pd.concat(top_hits_buffer, axis=0).reset_index(drop=True)
-            top_hits_buffer.to_parquet(parquet_output)
+            pd.concat(top_hits_buffer, axis=0).reset_index(drop=True).to_parquet(parquet_output)
+            #top_hits_buffer = pd.concat(top_hits_buffer, axis=0).reset_index(drop=True)
+            #top_hits_buffer.to_parquet(parquet_output)
 
 
 def save_results(project_directory, fasta_name):
