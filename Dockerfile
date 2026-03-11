@@ -25,6 +25,8 @@ COPY modifications/metadata_download.py /usr/local/lib/python3.11/site-packages/
 COPY modifications/__main__.py /usr/local/lib/python3.11/site-packages/boldigger3/__main__.py
 COPY modifications/add_metadata.py /usr/local/lib/python3.11/site-packages/boldigger3/add_metadata.py
 COPY modifications/id_engine.py /usr/local/lib/python3.11/site-packages/boldigger3/id_engine.py
+COPY modifications/select_top_hit.py /usr/local/lib/python3.11/site-packages/boldigger3/select_top_hit.py
+
 
 # Default command
 ENTRYPOINT ["python", "-m", "boldigger3"]
