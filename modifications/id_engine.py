@@ -957,7 +957,6 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
     """Main function to run the BOLD identification engine."""
 
     log("INFO", "Reading input FASTA")
-    log("DEBUG", "TEST LOG MESSAGE")
 
     fasta_dict, fasta_name, project_directory = parse_fasta(fasta_path)
     fasta_dict_order = {key: idx for idx, key in enumerate(fasta_dict.keys())}
@@ -1080,6 +1079,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
 
         log("BATCH", f"Batch {batch_index} completed")
                 
+
 
 
 
