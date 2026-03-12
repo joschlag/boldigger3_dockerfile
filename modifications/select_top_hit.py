@@ -306,6 +306,18 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
 
         # select top hit
         hits_above_similarity = hits_above_similarity.sort_values(by="count", ascending=False)
+
+        if hits_above_similarity.empty:
+            threshold, level = move_threshold_up(threshold, thresholds)
+            continue
+
+        # ---------------- DEBUG GROUPED HITS ----------------
+        if hits_above_similarity.empty:
+            print(f"[DEBUG] Grouped hits empty for ID {hits_for_id['id'].iloc[0]}")
+            print("Threshold:", threshold, "Level:", level)
+            print(hits_for_id[["genus","species","pct_identity"]].head(20))
+        # -----------------------------------------------------
+
         top_hit_row = hits_above_similarity.iloc[0]
         top_count = top_hit_row["count"]
         top_ratio = top_count / hits_above_similarity["count"].sum()
@@ -410,12 +422,36 @@ def gather_top_hits(
                 continue
 
             try:
-                #top_hits_buffer.append(find_top_hit(hits_for_id, thresholds))
                 result = find_top_hit(hits_for_id, thresholds)
                 if result is not None and not result.empty:
                     top_hits_buffer.append(result)
+
             except Exception as e:
                 print(f"[ERROR] Failed processing ID {query_id}: {e}")
+
+                # ---------------- DEBUG BLOCK ----------------
+                print("\n----- DEBUG HITS START -----")
+                print(f"Query ID: {query_id}")
+                print("Number of hits:", len(hits_for_id))
+
+                debug_cols = [
+                    "id",
+                    "phylum",
+                    "class",
+                    "order",
+                    "family",
+                    "genus",
+                    "species",
+                    "pct_identity",
+                    "status",
+                    "bin_uri",
+                ]
+
+                existing_cols = [c for c in debug_cols if c in hits_for_id.columns]
+                print(hits_for_id[existing_cols].head(20))
+                print("----- DEBUG HITS END -----\n")
+                # ------------------------------------------------
+
                 continue
 
             # flush buffer
@@ -444,6 +480,12 @@ def save_results(project_directory, fasta_name):
     data_paths = project_directory.joinpath("boldigger3_data").glob(
         f"{fasta_name}_top_hit_buffer_*.parquet.snappy"
     )
+    data_paths = list(data_paths)
+
+    if not data_paths:
+        print("[WARN] No top hits generated.")
+        return
+
     all_top_hits = dd.read_parquet([str(f) for f in data_paths])
 
     # order values globally by fasta order, drop afterwards
