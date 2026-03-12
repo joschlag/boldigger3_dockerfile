@@ -41,9 +41,6 @@ def clean_dataframe(dataframe: object) -> object:
         col = dataframe[level].astype("string")
         mask = col.str.contains(pattern, regex=True, na=pd.NA)
         dataframe[level] = col.where(~mask)
-    # dataframe[levels] = dataframe[levels].apply(
-    #     lambda col: col.where(~col.str.contains(pattern, regex=True)).astype("string")
-    # )
 
     # replace all empty strings in dataframe with pd.NA
     dataframe = dataframe.replace("", pd.NA)
@@ -127,24 +124,6 @@ def get_threshold(hit_for_id: object, thresholds: list) -> object:
             return thresholds[5], "phylum"
 
 
-# def move_threshold_up(threshold: int, thresholds: list) -> tuple:
-#     """Function to move the threshold up one taxonomic level.
-#     Returns a new threshold and level as a tuple.
-
-#     Args:
-#         threshold (int): Current threshold.
-#         thresholds (list): List of all thresholds.
-
-#     Returns:
-#         tuple: (new_threshold, thresholds)
-#     """
-#     levels = ["species", "genus", "family", "order", "class", "phylum"]
-
-#     return (
-#         thresholds[thresholds.index(threshold) + 1],
-#         levels[thresholds.index(threshold) + 1],
-#     )
-
 def move_threshold_up(threshold: int, thresholds: list) -> tuple:
     """Function to move the threshold up one taxonomic level safely."""
     levels = ["species", "genus", "family", "order", "class", "phylum"]
@@ -171,7 +150,8 @@ def flag_hits(top_hits: object, final_top_hit: object):
         flags[0] = "1"
 
     # flag 2: top hit ratio < 90%
-    if final_top_hit["records_ratio"].item() < 0.9:
+    #if final_top_hit["records_ratio"].item() < 0.9:
+    if final_top_hit["records_ratio"].iloc[0] < 0.9:
         flags[1] = "2"
 
     # flag 3: all of the selected top hits are private
@@ -182,7 +162,9 @@ def flag_hits(top_hits: object, final_top_hit: object):
         flags[3] = "4"
 
     # flag 5: top hit is represented by multiple bins
-    if len(final_top_hit["BIN"].str.split("|").item()) > 1:
+    #if len(final_top_hit["BIN"].str.split("|").item()) > 1:
+    bin_value = final_top_hit["BIN"].iloc[0]
+    if pd.notna(bin_value) and len(str(bin_value).split("|")) > 1:
         flags[4] = "5"
 
     flags = "|".join(flags)
@@ -258,7 +240,21 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
         iteration += 1
         # copy the hits to perform modifications
         hits_above_similarity = hits_for_id[hits_for_id["pct_identity"] > threshold].copy()
-
+        # -----------------------------------------------------------------
+        # Robust handling for mixed taxonomy hits
+        # If species-level records exist, ignore genus-only rows.
+        # This prevents mixed rows like:
+        #   Asaphes vulgaris
+        #   Asaphes
+        # -----------------------------------------------------------------
+        if level == "species":
+            species_rows = hits_above_similarity[
+                hits_above_similarity["species"].notna()
+                & (hits_above_similarity["species"].astype(str).str.strip() != "")
+            ]
+            if not species_rows.empty:
+                hits_above_similarity = species_rows
+        # -----------------------------------------------------------------
         levels = all_levels[: all_levels.index(level) + 1]
         # select the hits above similarity and of interest
         hits_above_similarity = hits_above_similarity[levels].copy()
@@ -273,10 +269,40 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
             try:
                 threshold, level = move_threshold_up(threshold, thresholds)
                 continue
+            # except IndexError:
+            #     # reached topmost threshold, return first row safely
+            #     print(f"[WARN] ID {hits_for_id['id'].iloc[0]} reached max threshold without hits")
+            #     return hits_for_id.head(1)
             except IndexError:
-                # reached topmost threshold, return first row safely
+                # reached topmost threshold, return safest possible row
                 print(f"[WARN] ID {hits_for_id['id'].iloc[0]} reached max threshold without hits")
-                return hits_for_id.head(1)
+
+                fallback = hits_for_id.head(1).copy()
+                fallback["records"] = 1
+                fallback["records_ratio"] = 1.0
+                fallback["selected_level"] = level
+                fallback["BIN"] = ""
+                fallback["flags"] = ""
+
+                return fallback[
+                    [
+                        "id",
+                        "phylum",
+                        "class",
+                        "order",
+                        "family",
+                        "genus",
+                        "species",
+                        "pct_identity",
+                        "status",
+                        "records",
+                        "records_ratio",
+                        "selected_level",
+                        "BIN",
+                        "flags",
+                        "fasta_order",
+                    ]
+                ]
 
         # select top hit
         hits_above_similarity = hits_above_similarity.sort_values(by="count", ascending=False)
@@ -335,7 +361,35 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
 
     # fallback if max iterations reached
     print(f"[WARN] ID {hits_for_id['id'].iloc[0]} exceeded max iterations")
-    return hits_for_id.head(1)
+    #return hits_for_id.head(1)
+    # fallback if max iterations reached
+
+    fallback = hits_for_id.head(1).copy()
+    fallback["records"] = 1
+    fallback["records_ratio"] = 1.0
+    fallback["selected_level"] = level
+    fallback["BIN"] = ""
+    fallback["flags"] = ""
+
+    return fallback[
+        [
+            "id",
+            "phylum",
+            "class",
+            "order",
+            "family",
+            "genus",
+            "species",
+            "pct_identity",
+            "status",
+            "records",
+            "records_ratio",
+            "selected_level",
+            "BIN",
+            "flags",
+            "fasta_order",
+        ]
+    ]
 
 
 
@@ -356,7 +410,10 @@ def gather_top_hits(
                 continue
 
             try:
-                top_hits_buffer.append(find_top_hit(hits_for_id, thresholds))
+                #top_hits_buffer.append(find_top_hit(hits_for_id, thresholds))
+                result = find_top_hit(hits_for_id, thresholds)
+                if result is not None and not result.empty:
+                    top_hits_buffer.append(result)
             except Exception as e:
                 print(f"[ERROR] Failed processing ID {query_id}: {e}")
                 continue
