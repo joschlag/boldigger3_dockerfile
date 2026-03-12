@@ -300,7 +300,10 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
         top_count = top_hit_row["count"]
         top_ratio = top_count / hits_above_similarity["count"].sum()
 
-        query_parts = [f"`{col}` == '{str(top_hit_row[col]).replace("'", "''")}'" for col in top_hit_row.index[:-1]]
+        query_parts = [
+            f'`{col}` == \'{str(top_hit_row[col]).replace("\'", "\'\'")}\''
+            for col in top_hit_row.index[:-1]
+        ]
         query_string = " and ".join(query_parts)
         top_hits = hits_for_id.query(query_string)
 
