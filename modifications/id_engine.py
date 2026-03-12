@@ -733,8 +733,11 @@ def download_json(
                 req.retry_count += 1
 
                 if req.retry_count <= req.max_retries:
-                    wait = 2 ** req.retry_count
+                    wait = min(300, 60 * req.retry_count)
                     req.next_attempt = now + datetime.timedelta(seconds=wait)
+                
+                    # reset runtime window for retry
+                    req.timestamp = now
                     tqdm.write(
                         f"{now:%H:%M:%S}: Retrying {key} "
                         f"({req.retry_count}/{req.max_retries}) – waiting {wait}s."
@@ -1077,6 +1080,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
 
         log("BATCH", f"Batch {batch_index} completed")
                 
+
 
 
 
