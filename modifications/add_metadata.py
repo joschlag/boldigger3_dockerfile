@@ -19,14 +19,25 @@ def merge_in_additional_data(id_engine_db: str, metadata_db: str) -> None:
     # check if the table exists
     tables = id_engine_con.execute("SHOW TABLES").fetchall()
     tables = [name[0] for name in tables]
+    #if "final_results" in tables:
+    #    print(
+    #        f"{datetime.datetime.now().strftime('%H:%M:%S')}: Metadata has already been added in a previous run."
+    #    )
     if "final_results" in tables:
-        print(
-            f"{datetime.datetime.now().strftime('%H:%M:%S')}: Metadata has already been added in a previous run."
-        )
+        print(f"{datetime.datetime.now():%H:%M:%S}: Refreshing metadata table.")
+        id_engine_con.execute("DROP TABLE final_results")
 
     # SQL Command definition
+    #sql_command = f"""
+    #CREATE TABLE IF NOT EXISTS final_results AS
+    #SELECT *
+    #FROM id_engine_results
+    #LEFT JOIN metadata.bold_public
+    #ON id_engine_results.process_id = metadata.bold_public.processid
+    #ORDER BY id_engine_results.fasta_order ASC, id_engine_results.pct_identity DESC
+    #"""
     sql_command = f"""
-    CREATE TABLE IF NOT EXISTS final_results AS
+    CREATE TABLE final_results AS
     SELECT *
     FROM id_engine_results
     LEFT JOIN metadata.bold_public
@@ -89,3 +100,4 @@ def main(
     )
     # merge in the additional data
     merge_in_additional_data(id_engine_db_path, metadata_db_path)
+
