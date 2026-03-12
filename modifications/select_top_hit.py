@@ -232,7 +232,6 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
 
         return return_value
 
-    
     # define the levels for the groupby. care about the selector string later
     all_levels = ["phylum", "class", "order", "family", "genus", "species"]
     # go through the hits to make the selection
@@ -264,26 +263,19 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
             .reset_index(name="count")
         )
         hits_above_similarity = hits_above_similarity.dropna(subset=[level], axis=0)
-        # if nothing left, move threshold up safely
-        if len(hits_above_similarity) == 0:
+
+
+        if hits_above_similarity.empty:
             try:
                 threshold, level = move_threshold_up(threshold, thresholds)
                 continue
-            # except IndexError:
-            #     # reached topmost threshold, return first row safely
-            #     print(f"[WARN] ID {hits_for_id['id'].iloc[0]} reached max threshold without hits")
-            #     return hits_for_id.head(1)
             except IndexError:
-                # reached topmost threshold, return safest possible row
-                print(f"[WARN] ID {hits_for_id['id'].iloc[0]} reached max threshold without hits")
-
                 fallback = hits_for_id.head(1).copy()
                 fallback["records"] = 1
                 fallback["records_ratio"] = 1.0
                 fallback["selected_level"] = level
                 fallback["BIN"] = ""
                 fallback["flags"] = ""
-
                 return fallback[
                     [
                         "id",
@@ -304,43 +296,23 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
                     ]
                 ]
 
-        # select top hit
-        hits_above_similarity = hits_above_similarity.sort_values(by="count", ascending=False)
-
-        if hits_above_similarity.empty:
-            threshold, level = move_threshold_up(threshold, thresholds)
-            continue
-
-        # ---------------- DEBUG GROUPED HITS ----------------
-        if hits_above_similarity.empty:
-            print(f"[DEBUG] Grouped hits empty for ID {hits_for_id['id'].iloc[0]}")
-            print("Threshold:", threshold, "Level:", level)
-            print(hits_for_id[["genus","species","pct_identity"]].head(20))
-        # -----------------------------------------------------
-
         top_hit_row = hits_above_similarity.iloc[0]
         top_count = top_hit_row["count"]
         top_ratio = top_count / hits_above_similarity["count"].sum()
 
-        # build query string for the top hit
-        query_parts = []
-        for col in top_hit_row.index[:-1]:  # skip 'count'
-            val = str(top_hit_row[col]).replace("'", "''")  # escape single quotes
-            query_parts.append(f"`{col}` == '{val}'")
+        query_parts = [f"`{col}` == '{str(top_hit_row[col]).replace("'", "''")}'" for col in top_hit_row.index[:-1]]
         query_string = " and ".join(query_parts)
-
         top_hits = hits_for_id.query(query_string)
-
-        # collect BINs
-        top_hit_bins = top_hits["bin_uri"].dropna().unique() if threshold == thresholds[0] else []
 
         final_top_hit = top_hits.head(1).copy()
         final_top_hit["records"] = top_count
         final_top_hit["records_ratio"] = top_ratio
         final_top_hit["selected_level"] = level
-        final_top_hit["BIN"] = "|".join(top_hit_bins)
 
-        # remove higher-level info if threshold < top
+        # safe BIN collection
+        top_hit_bins = top_hits["bin_uri"].dropna().unique() if threshold == thresholds[0] else []
+        final_top_hit["BIN"] = "|".join(top_hit_bins) if len(top_hit_bins) > 0 else pd.NA
+
         if threshold != thresholds[0]:
             idx = all_levels.index(level)
             levels_to_remove = all_levels[idx + 1 :]
@@ -349,7 +321,6 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
 
         final_top_hit["flags"] = flag_hits(top_hits, final_top_hit)
 
-        # select relevant columns
         final_top_hit = final_top_hit[
             [
                 "id",
@@ -372,17 +343,12 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
         return final_top_hit
 
     # fallback if max iterations reached
-    print(f"[WARN] ID {hits_for_id['id'].iloc[0]} exceeded max iterations")
-    #return hits_for_id.head(1)
-    # fallback if max iterations reached
-
     fallback = hits_for_id.head(1).copy()
     fallback["records"] = 1
     fallback["records_ratio"] = 1.0
     fallback["selected_level"] = level
     fallback["BIN"] = ""
     fallback["flags"] = ""
-
     return fallback[
         [
             "id",
@@ -402,7 +368,6 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
             "fasta_order",
         ]
     ]
-
 
 
 def gather_top_hits(
