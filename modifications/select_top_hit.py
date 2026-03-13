@@ -1,11 +1,28 @@
-import duckdb, datetime, more_itertools, re, time
+import duckdb, datetime, more_itertools, re, time, sys
 import pandas as pd
 import dask.dataframe as dd
 import numpy as np
 from tqdm import tqdm
 from boldigger3.id_engine import parse_fasta
 from string import punctuation, digits
+from pathlib import Path
 
+
+class Tee:
+    """Duplicate output to terminal and log file."""
+    def __init__(self, file, stream):
+        self.file = file
+        self.stream = stream
+
+    def write(self, message):
+        self.stream.write(message)
+        self.file.write(message)
+
+    def flush(self):
+        self.stream.flush()
+        self.file.flush()
+
+TAXONOMY_CONFLICT_COUNTER = 0
 
 def clean_dataframe(dataframe: object) -> object:
     # replace missing values and empty strings in metadata to pd.NA
@@ -61,7 +78,9 @@ def clean_dataframe(dataframe: object) -> object:
         dataframe["lat"], dataframe["lon"] = np.nan, np.nan
 
     # drop coord column
-    dataframe = dataframe.drop("coord", axis=1)
+    #dataframe = dataframe.drop("coord", axis=1)
+    if "coord" in dataframe.columns:
+        dataframe = dataframe.drop("coord", axis=1)
 
     return dataframe
 
@@ -83,7 +102,7 @@ def stream_hits_to_excel(id_engine_db_path, project_directory, fasta_dict, fasta
             chunk_data = clean_dataframe(chunk_data)
 
             # drop the fasta order just before saving
-            chunk_data = chunk_data.drop("fasta_order", axis=1)
+            chunk_data = chunk_data.drop("fasta_order", axis=1, errors="ignore")
 
             chunk_data.to_excel(
                 output_path.joinpath(f"{fasta_name}_bold_results_part_{part}.xlsx"),
@@ -164,7 +183,12 @@ def flag_hits(top_hits: object, final_top_hit: object):
 
     # flag 5: top hit is represented by multiple bins
     #if len(final_top_hit["BIN"].str.split("|").item()) > 1:
-    bin_value = final_top_hit["BIN"].iloc[0]
+    # bin_value = final_top_hit["BIN"].iloc[0]
+    if final_top_hit.empty or "BIN" not in final_top_hit.columns:
+        bin_value = pd.NA
+    else:
+        bin_value = final_top_hit["BIN"].iloc[0]
+
     if pd.notna(bin_value) and len(str(bin_value).split("|")) > 1:
         flags[4] = "5"
 
@@ -185,8 +209,65 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
     """
 
     iteration = 0
-    # safety limit to avoid infinite loops
-    max_iterations = 20  
+    # safety limit to avoid infinite loops    
+    max_iterations = 20
+
+    # guard against empty hits
+    if hits_for_id.empty:
+        return None
+
+    # guard against missing pct_identity
+    if hits_for_id["pct_identity"].dropna().empty:
+        return None
+
+
+
+    # ------------------------------------------------------
+    # Detect mixed higher taxonomy and apply majority filter
+    # ------------------------------------------------------
+    tax_levels = ["phylum", "class", "order"]
+
+    for tax_level in tax_levels:
+        unique_values = hits_for_id[tax_level].dropna().unique()
+        if len(unique_values) > 1:
+
+            mode_values = hits_for_id[tax_level].mode()
+            if mode_values.empty:
+                continue
+            majority_value = mode_values.iloc[0]
+
+            global TAXONOMY_CONFLICT_COUNTER
+            TAXONOMY_CONFLICT_COUNTER += 1
+
+            removed_rows = hits_for_id[hits_for_id[tax_level] != majority_value]
+
+            print("\n[WARN] Mixed taxonomy detected")
+            print(f"ID: {hits_for_id['id'].iloc[0]}")
+            print(f"Level: {tax_level}")
+            print(f"Majority: {majority_value}")
+            print(f"Removed rows: {len(removed_rows)}")
+
+            debug_cols = [
+                "phylum",
+                "class",
+                "order",
+                "family",
+                "genus",
+                "species",
+                "pct_identity",
+                "status",
+                "bin_uri",
+            ]
+
+            existing_cols = [c for c in debug_cols if c in removed_rows.columns]
+
+            print(removed_rows[existing_cols].head(10))
+
+            # apply majority filter
+            mask = hits_for_id[tax_level] == majority_value
+            hits_for_id = hits_for_id[mask]
+
+
 
     # get the thrshold and taxonomic level
     threshold, level = get_threshold(hits_for_id, thresholds)
@@ -239,7 +320,7 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
     while iteration < max_iterations:
         iteration += 1
         # copy the hits to perform modifications
-        hits_above_similarity = hits_for_id[hits_for_id["pct_identity"] > threshold].copy()
+        hits_above_similarity = hits_for_id[hits_for_id["pct_identity"] >= threshold].copy()
         # -----------------------------------------------------------------
         # Robust handling for mixed taxonomy hits
         # If species-level records exist, ignore genus-only rows.
@@ -256,6 +337,12 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
                 hits_above_similarity = species_rows
         # -----------------------------------------------------------------
         levels = all_levels[: all_levels.index(level) + 1]
+
+        if hits_above_similarity[levels].dropna(how="all").empty:
+            threshold, level = move_threshold_up(threshold, thresholds)
+            continue
+
+
         # select the hits above similarity and of interest
         hits_above_similarity = hits_above_similarity[levels].copy()
         hits_above_similarity = (
@@ -263,8 +350,8 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
             .size()
             .reset_index(name="count")
         )
-        hits_above_similarity = hits_above_similarity.dropna(subset=[level], axis=0)
 
+        hits_above_similarity = hits_above_similarity.dropna(subset=[level], axis=0)
 
         if hits_above_similarity.empty:
             try:
@@ -316,7 +403,12 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
         final_top_hit["selected_level"] = level
 
         # safe BIN collection
-        top_hit_bins = top_hits["bin_uri"].dropna().unique() if threshold == thresholds[0] else []
+        #top_hit_bins = top_hits["bin_uri"].dropna().unique() if threshold == thresholds[0] else []
+        if threshold == thresholds[0] and "bin_uri" in top_hits.columns:
+            top_hit_bins = top_hits["bin_uri"].dropna().unique()
+        else:
+            top_hit_bins = []
+
         final_top_hit["BIN"] = "|".join(top_hit_bins) if len(top_hit_bins) > 0 else pd.NA
 
         if threshold != thresholds[0]:
@@ -385,8 +477,14 @@ def gather_top_hits(
 
     with duckdb.connect(id_engine_db_path) as connection:
         for query_id in tqdm(fasta_dict.keys(), desc="Top hit calculation"):
-            sql_query = f"SELECT * FROM final_results WHERE id='{query_id}' ORDER BY fasta_order ASC, pct_identity DESC"
-            hits_for_id = clean_dataframe(connection.execute(sql_query).df())
+            #sql_query = f"SELECT * FROM final_results WHERE id='{query_id}' ORDER BY fasta_order ASC, pct_identity DESC"
+            #hits_for_id = clean_dataframe(connection.execute(sql_query).df())
+            sql_query = """
+            SELECT * FROM final_results 
+            WHERE id = ?
+            ORDER BY fasta_order ASC, pct_identity DESC
+            """
+            hits_for_id = clean_dataframe(connection.execute(sql_query, [query_id]).df())
 
             if hits_for_id.empty:
                 print(f"[WARN] No hits found for ID: {query_id}")
@@ -494,6 +592,22 @@ def main(fasta_path: str, thresholds: list):
     # load the fasta data
     fasta_dict, fasta_name, project_directory = parse_fasta(fasta_path)
 
+    # ----------------------------------------
+    # create log file capturing terminal output
+    # ----------------------------------------
+    log_dir = project_directory.joinpath("boldigger3_logs")
+    log_dir.mkdir(exist_ok=True)
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file_path = log_dir.joinpath(f"{timestamp}_{fasta_name}.log")
+
+    log_file = open(log_file_path, "w", buffering=1)
+
+    sys.stdout = Tee(log_file, sys.__stdout__)
+    sys.stderr = Tee(log_file, sys.__stderr__)
+
+    print(f"[LOG] Writing terminal output to: {log_file_path}")
+
     # define the id engine database path
     id_engine_db_path = project_directory.joinpath(
         "boldigger3_data", f"{fasta_name}.duckdb"
@@ -518,3 +632,4 @@ def main(fasta_path: str, thresholds: list):
     save_results(project_directory, fasta_name)
 
     tqdm.write(f"{datetime.datetime.now().strftime('%H:%M:%S')}: Finished.")
+    print(f"[SUMMARY] Mixed taxonomy conflicts detected: {TAXONOMY_CONFLICT_COUNTER}")
