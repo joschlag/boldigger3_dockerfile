@@ -302,8 +302,11 @@ def find_top_hit(hits_for_id: object, thresholds: list, mixed_taxonomy_log) -> o
         top_count = top_hit_row["count"]
         top_ratio = top_count / hits_grouped["count"].sum()
 
-        query_parts = [f"`{col}` == '{str(top_hit_row[col]).replace('\'','\'\'')}'" 
-                       for col in top_hit_row.index[:-1]]
+        query_parts = []
+        for col in top_hit_row.index[:-1]:
+            value = str(top_hit_row[col]).replace("'", "''")  # do replacement outside f-string
+            query_parts.append(f"`{col}` == '{value}'")       # safe f-string
+        query_string = " and ".join(query_parts)
         top_hits = hits_for_id.query(" and ".join(query_parts))
 
         final_top_hit = top_hits.head(1).copy()
