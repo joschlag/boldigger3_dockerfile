@@ -230,22 +230,27 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
     for tax_level in tax_levels:
         unique_values = hits_for_id[tax_level].dropna().unique()
         if len(unique_values) > 1:
+            value_counts = hits_for_id[tax_level].value_counts()
+            majority_value = value_counts.idxmax()
+            counts = value_counts.iloc[0]
+            total = value_counts.sum()
 
-            mode_values = hits_for_id[tax_level].mode()
-            if mode_values.empty:
-                continue
-            majority_value = mode_values.iloc[0]
+            # if majority is not overwhelming (e.g., < 60% of total), drop lower levels
+            if counts / total < 0.75:
+                lower_levels = ["family", "genus", "species"]
+                hits_for_id[lower_levels] = pd.NA
+                majority_value = None  # optional, indicates no clear majority
 
-            global TAXONOMY_CONFLICT_COUNTER
-            TAXONOMY_CONFLICT_COUNTER += 1
+            removed_rows = hits_for_id[hits_for_id[tax_level] != majority_value] if majority_value else hits_for_id.copy()
 
-            removed_rows = hits_for_id[hits_for_id[tax_level] != majority_value]
-
-            print("\n[WARN] Mixed taxonomy detected")
-            print(f"ID: {hits_for_id['id'].iloc[0]}")
-            print(f"Level: {tax_level}")
-            print(f"Majority: {majority_value}")
-            print(f"Removed rows: {len(removed_rows)}")
+            mixed_taxonomy_log.write("\n[WARN] Mixed taxonomy detected\n")
+            mixed_taxonomy_log.write(f"ID: {hits_for_id['id'].iloc[0]}\n")
+            mixed_taxonomy_log.write(f"Level: {tax_level}\n")
+            mixed_taxonomy_log.write(f"Majority: {majority_value}\n")
+            mixed_taxonomy_log.write(f"Removed rows: {len(removed_rows)}\n")
+            mixed_taxonomy_log.write(removed_rows[existing_cols].head(10).to_string())
+            mixed_taxonomy_log.write("\n" + "-"*50 + "\n")
+            mixed_taxonomy_log.write(f"[INFO] Low-majority: cleared lower taxonomy levels\n")
 
             debug_cols = [
                 "phylum",
@@ -608,6 +613,13 @@ def main(fasta_path: str, thresholds: list):
 
     print(f"[LOG] Writing terminal output to: {log_file_path}")
 
+    # ----------------------------------------
+    # create separate log for mixed taxonomy
+    # ----------------------------------------
+    mixed_taxonomy_log_path = log_dir.joinpath(f"{timestamp}_{fasta_name}_mixed_taxonomy.log")
+    mixed_taxonomy_log = open(mixed_taxonomy_log_path, "w", buffering=1)
+
+
     # define the id engine database path
     id_engine_db_path = project_directory.joinpath(
         "boldigger3_data", f"{fasta_name}.duckdb"
@@ -633,3 +645,4 @@ def main(fasta_path: str, thresholds: list):
 
     tqdm.write(f"{datetime.datetime.now().strftime('%H:%M:%S')}: Finished.")
     print(f"[SUMMARY] Mixed taxonomy conflicts detected: {TAXONOMY_CONFLICT_COUNTER}")
+    mixed_taxonomy_log.close()
