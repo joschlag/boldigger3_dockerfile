@@ -218,10 +218,15 @@ def build_download_queue(fasta_dict: dict, database: int, operating_mode: int) -
     """
 
     # Initialize queue including retry container
+    # download_queue = {
+    #     "waiting": OrderedDict(),
+    #     "active": dict(),
+    #     "retry": dict(),
+    # }
     download_queue = {
         "waiting": OrderedDict(),
         "active": dict(),
-        "retry": dict(),
+        "retry": OrderedDict(),
     }
 
     # Base URL + generic params
@@ -419,7 +424,33 @@ def build_post_request(BoldIdRequest: object) -> object:
                 files=files,
                 timeout=30,
             )
-            # parse JSON result (may raise)
+
+            
+            # ---------- NEW STATUS CHECK ----------
+            if response.status_code != 200:
+
+                BoldIdRequest.retry_count += 1
+
+                if BoldIdRequest.retry_count <= BoldIdRequest.max_retries:
+                    wait_seconds = 2 ** BoldIdRequest.retry_count
+                    BoldIdRequest.next_attempt = datetime.datetime.now() + datetime.timedelta(seconds=wait_seconds)
+
+                    log(
+                        "RETRY",
+                        f"POST HTTP {response.status_code} retry "
+                        f"{BoldIdRequest.retry_count}/{BoldIdRequest.max_retries}"
+                    )
+                else:
+                    log(
+                        "ERROR",
+                        f"POST permanently failed HTTP {response.status_code}"
+                    )
+                    BoldIdRequest.next_attempt = None
+
+                return BoldIdRequest
+            # -------------------------------------
+
+            # parse JSON result
             result = json.loads(response.text)
 
         except Exception as e:
@@ -577,7 +608,9 @@ def parse_and_save_data(
     # transform to dataframe, drop unused labels, add ordering column, use correct type annotations
     id_engine_result = pd.DataFrame(rows)
     id_engine_result = id_engine_result.drop(
-        labels=["subfamily", "taxid_count"], axis=1
+        labels=["subfamily", "taxid_count"],
+        axis=1,
+        errors="ignore"
     )
     id_engine_result["pct_identity"] = id_engine_result["pct_identity"].astype(
         "float64"
@@ -588,8 +621,14 @@ def parse_and_save_data(
     id_engine_result["fasta_order"] = id_engine_result["id"].map(fasta_order)
 
     # reorder the columns
-    id_engine_result = id_engine_result[
-        [
+    #id_engine_result = id_engine_result[
+    #    [
+    #        "id",
+    #        ...
+    #        "fasta_order",
+    #    ]
+    #]
+    columns = [
             "id",
             "phylum",
             "class",
@@ -605,8 +644,8 @@ def parse_and_save_data(
             "operating_mode",
             "status",
             "fasta_order",
-        ]
     ]
+    id_engine_result = id_engine_result.reindex(columns=columns)
 
     # finally stream to parquet to later load into duckdb, update the active queue
     output_file = database_path.joinpath(
@@ -998,7 +1037,7 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
         batch_start_time = datetime.datetime.now()
 
         download_queue = build_download_queue(batch_dict, database, operating_mode)
-        download_queue["retry"] = OrderedDict()
+        #download_queue["retry"] = OrderedDict()
 
         total_downloads = len(download_queue["waiting"]) + len(download_queue["active"])
         # ------------------- MAIN DOWNLOAD LOOP -------------------
@@ -1079,16 +1118,3 @@ def main(fasta_path: str, database: int, operating_mode: int) -> None:
             log("BATCH", f"Batch {batch_index} runtime: {batch_elapsed}")
 
         log("BATCH", f"Batch {batch_index} completed")
-                
-
-
-
-
-
-
-
-
-
-
-
-
