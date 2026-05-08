@@ -139,16 +139,23 @@ def write_version_file(package_date: str, database_path: Path):
 
 def check_database(database_path: Path) -> tuple:
     """
-    Modified function: Uses manually downloaded database snapshot.
+    Fully offline version of check_database().
+
+    This version:
+      • NEVER contacts the old BOLD API
+      • NEVER performs a version check online
+      • ONLY uses local manually downloaded snapshots
+      • Prevents urllib from ever receiving an empty URL
 
     Returns:
         tuple: (download_needed, download_url, output_path, package_date)
                download_url is always "" because no download occurs.
     """
 
+    # Ensure the folder exists
     database_path.mkdir(exist_ok=True)
 
-    # Find any manually downloaded snapshot in the folder
+    # Look for manually downloaded snapshots
     snapshots = list(database_path.glob("database_snapshot_*.tar.gz"))
 
     if not snapshots:
@@ -158,7 +165,7 @@ def check_database(database_path: Path) -> tuple:
             "database_snapshot_2026-03-27.tar.gz"
         )
 
-    # Use the most recent snapshot (sorted by filename)
+    # Use the most recent snapshot (sorted alphabetically = chronologically)
     snapshots.sort()
     output_path = snapshots[-1]
 
@@ -175,8 +182,10 @@ def check_database(database_path: Path) -> tuple:
 
     # Otherwise, import the local tar.gz
     print(f"{datetime.datetime.now():%H:%M:%S}: Using local snapshot {output_path.name}.")
-    print(f"{datetime.datetime.now():%H:%M:%S}: Skipping all downloads.")
+    print(f"{datetime.datetime.now():%H:%M:%S}: Skipping all downloads (offline mode).")
+
     return True, "", output_path, package_date
+
 
 
 
@@ -302,10 +311,14 @@ def main(db_dir: Path = None):
     # Check if new data is needed
     downloaded_needed, url, output_path, package_date = check_database(db_dir)
     # downloaded_needed, url, output_path, package_date = check_database()
-
+    
     if downloaded_needed:
-        download_url(url, output_path)
-        print(
-            f"{datetime.datetime.now():%H:%M:%S}: Compiling downloaded data stored at {output_path}, this will take a while."
-        )
-        database_to_duckdb(output_path, package_date, db_dir)
+    print(f"{datetime.datetime.now():%H:%M:%S}: Importing local snapshot.")
+    database_to_duckdb(output_path, package_date, db_dir)
+
+    #if downloaded_needed:
+    #    download_url(url, output_path)
+    #    print(
+    #        f"{datetime.datetime.now():%H:%M:%S}: Compiling downloaded data stored at {output_path}, this will take a while."
+    #    )
+    #    database_to_duckdb(output_path, package_date, db_dir)
