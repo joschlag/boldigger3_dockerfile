@@ -313,8 +313,8 @@ def main(db_dir: Path = None):
     # downloaded_needed, url, output_path, package_date = check_database()
     
     if downloaded_needed:
-    print(f"{datetime.datetime.now():%H:%M:%S}: Importing local snapshot.")
-    database_to_duckdb(output_path, package_date, db_dir)
+        print(f"{datetime.datetime.now():%H:%M:%S}: Importing local snapshot.")
+        database_to_duckdb(output_path, package_date, db_dir)
 
     #if downloaded_needed:
     #    download_url(url, output_path)
