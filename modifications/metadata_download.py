@@ -181,12 +181,17 @@ def check_database(database_path: Path) -> tuple:
             print(f"{datetime.datetime.now():%H:%M:%S}: Removing old version.")
             empty_folder(database_path)
             print(f"{datetime.datetime.now():%H:%M:%S}: Starting to download.")
-            r = session.get(
-                f"https://bench.boldsystems.org/index.php/API_Datapackage?id={package_id}"
-            )
-            uid = r.text.replace('"', "")
-            download_url = f"https://bench.boldsystems.org/index.php/API_Datapackage?id={package_id}&uid={uid}"
+            
+            # Use direct datapackage link instead of API UID request
+            download_url = f"https://bench.boldsystems.org/index.php/datapackage?id={package_id}"
             return True, download_url, output_path, package_date
+
+            #r = session.get(
+            #    f"https://bench.boldsystems.org/index.php/API_Datapackage?id={package_id}"
+            #)
+            #uid = r.text.replace('"', "")
+            #download_url = f"https://bench.boldsystems.org/index.php/API_Datapackage?id={package_id}&uid={uid}"
+            #return True, download_url, output_path, package_date
 
 
 def download_url(url: str, output_path: Path):
