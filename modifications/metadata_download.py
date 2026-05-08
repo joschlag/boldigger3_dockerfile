@@ -165,24 +165,24 @@ def check_database(database_path: Path) -> tuple:
     #        "database_snapshot_2026-03-27.tar.gz"
     #    )
     if not snapshots:
-    # If a DuckDB already exists, assume it's valid and skip import
-    duckdb_files = list(database_path.glob("*.duckdb"))
-    if duckdb_files:
-        print(f"{datetime.datetime.now():%H:%M:%S}: Found existing DuckDB, skipping snapshot import.")
-        # Extract date from version.txt if available
-        version_path = database_path / "version.txt"
-        if version_path.exists():
-            package_date = version_path.read_text().strip()
-        else:
-            package_date = "unknown"
-        return False, "", duckdb_files[0], package_date
-
-    # Otherwise fail as before
-    raise FileNotFoundError(
-        f"No local snapshot found in {database_path}. "
-        "Place your manually downloaded file here, named like: "
-        "database_snapshot_2026-03-27.tar.gz"
-    )
+        # If a DuckDB already exists, assume it's valid and skip import
+        duckdb_files = list(database_path.glob("*.duckdb"))
+        if duckdb_files:
+            print(f"{datetime.datetime.now():%H:%M:%S}: Found existing DuckDB, skipping snapshot import.")
+            # Extract date from version.txt if available
+            version_path = database_path / "version.txt"
+            if version_path.exists():
+                package_date = version_path.read_text().strip()
+            else:
+                package_date = "unknown"
+            return False, "", duckdb_files[0], package_date
+    
+        # Otherwise fail as before
+        raise FileNotFoundError(
+            f"No local snapshot found in {database_path}. "
+            "Place your manually downloaded file here, named like: "
+            "database_snapshot_2026-03-27.tar.gz"
+        )
 
     # Use the most recent snapshot (sorted alphabetically = chronologically)
     snapshots.sort()
