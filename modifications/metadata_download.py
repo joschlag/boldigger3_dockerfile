@@ -137,61 +137,47 @@ def write_version_file(package_date: str, database_path: Path):
 #     with open(version_path, "w") as f:
 #         f.write(package_date)
 
-
 def check_database(database_path: Path) -> tuple:
-    """Function to check if a new release of the BOLD data package is available.
+    """
+    Modified function: Uses manually downloaded database snapshot.
 
     Returns:
-        tuple: Returns a tuple with bool (downloaded needed), str (download url), str (output path to store the download), str (package date as string)
+        tuple: (download_needed, download_url, output_path, package_date)
+               download_url is always "" because no download occurs.
     """
-    # spec = importlib.util.find_spec("boldigger3").origin
-    # boldigger3_path = Path(spec).parent
-    # database_path = boldigger3_path.joinpath("database")
+
     database_path.mkdir(exist_ok=True)
 
-    with requests_html.HTMLSession() as session:
-        # fetch the latest version from the BOLD website
-        r = session.get("https://bench.boldsystems.org/index.php/datapackages/Latest")
-        r = r.html.find('[name="download-datapackage-unauthenticated"]', first=True)
-        # extract the package id
-        package_id = r.attrs.get("data-package-id")
-        package_date = parse(package_id.split(".")[-1])
-        package_date = package_date.strftime("%Y-%m-%d")
-        # generate an output path for the download and a duck db path for the duckdb database
-        #database_name = f"database_snapshot_{package_date}.tar.gz"
-        #output_path = database_path.joinpath(database_name)
-        #duckdb_name = f"database_snapshot_{package_date}.duckdb"
-        #duckdb_path = database_path.joinpath(duckdb_name)
+    # Find any manually downloaded snapshot in the folder
+    snapshots = list(database_path.glob("database_snapshot_*.tar.gz"))
 
-        archive_name = f"database_snapshot_{package_date}.tar.gz"
-        duckdb_name = f"database_snapshot_{package_date}.duckdb"
+    if not snapshots:
+        raise FileNotFoundError(
+            f"No local snapshot found in {database_path}. "
+            "Place your manually downloaded file here, named like: "
+            "database_snapshot_2026-03-27.tar.gz"
+        )
 
-        output_path = database_path / archive_name
-        duckdb_path = database_path / duckdb_name
+    # Use the most recent snapshot (sorted by filename)
+    snapshots.sort()
+    output_path = snapshots[-1]
 
-        # if the duck db database exists and the version file can be read and is up to date, nothing is to do
-        if duckdb_path.exists() and is_version_fresh(package_date, database_path):
-            print(f"{datetime.datetime.now():%H:%M:%S}: Database is up to date.")
-            return False, "", output_path, package_date
-        # triggers the download
-        else:
-            print(
-                f"{datetime.datetime.now():%H:%M:%S}: Database is outdated or version expired. Updating now."
-            )
-            print(f"{datetime.datetime.now():%H:%M:%S}: Removing old version.")
-            empty_folder(database_path)
-            print(f"{datetime.datetime.now():%H:%M:%S}: Starting to download.")
-            
-            # Use direct datapackage link instead of API UID request
-            download_url = f"https://bench.boldsystems.org/index.php/datapackage?id={package_id}"
-            return True, download_url, output_path, package_date
+    # Extract date from filename: database_snapshot_YYYY-MM-DD.tar.gz
+    package_date = output_path.stem.replace("database_snapshot_", "")
 
-            #r = session.get(
-            #    f"https://bench.boldsystems.org/index.php/API_Datapackage?id={package_id}"
-            #)
-            #uid = r.text.replace('"', "")
-            #download_url = f"https://bench.boldsystems.org/index.php/API_Datapackage?id={package_id}&uid={uid}"
-            #return True, download_url, output_path, package_date
+    # DuckDB file path
+    duckdb_path = database_path / f"database_snapshot_{package_date}.duckdb"
+
+    # If DuckDB already exists and version is fresh → nothing to do
+    if duckdb_path.exists() and is_version_fresh(package_date, database_path):
+        print(f"{datetime.datetime.now():%H:%M:%S}: Database is up to date.")
+        return False, "", output_path, package_date
+
+    # Otherwise, import the local tar.gz
+    print(f"{datetime.datetime.now():%H:%M:%S}: Using local snapshot {output_path.name}.")
+    print(f"{datetime.datetime.now():%H:%M:%S}: Skipping all downloads.")
+    return True, "", output_path, package_date
+
 
 
 def download_url(url: str, output_path: Path):
