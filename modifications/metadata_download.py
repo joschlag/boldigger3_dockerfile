@@ -224,7 +224,9 @@ def database_to_duckdb(output_path: Path, package_date: str, database_path: Path
             or not list(extract_path.glob("*.tsv"))
         ):
             print(f"{datetime.datetime.now():%H:%M:%S}: Extracting downloaded archive.")
-            with tarfile.open(output_path, "r:gz") as tar:
+            mode = "r:gz" if str(output_path).endswith(".tar.gz") else "r:"
+            with tarfile.open(output_path, mode) as tar:
+            #with tarfile.open(output_path, "r:gz") as tar:
                 tar.extractall(path=extract_path)
         else:
             print(
