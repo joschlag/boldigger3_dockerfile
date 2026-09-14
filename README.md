@@ -6,7 +6,7 @@ To run this modified version of boldigger3:
 docker run \
   -v /your/project/folder:/data \
   -w /data \
-  joschlag/boldigger3:3.0.0 \
+  joschlag/boldigger3:3.0.3 \
   python -m boldigger3 identify PATH_TO_FASTA PATH_TO_DATABASE --db 1 --mode 1
 
 
