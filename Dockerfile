@@ -29,4 +29,5 @@ COPY modifications/select_top_hit.py /usr/local/lib/python3.14/site-packages/bol
 
 
 # Default command
-ENTRYPOINT ["python", "-m", "boldigger3"]
+ENTRYPOINT ["python"] 
+#, "-m", "boldigger3"]
