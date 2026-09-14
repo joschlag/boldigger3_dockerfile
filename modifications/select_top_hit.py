@@ -97,46 +97,20 @@ def stream_hits_to_excel(id_engine_db_path, project_directory, fasta_dict, fasta
 
 
 def get_threshold(hit_for_id: object, thresholds: list) -> object:
-    """Function to find a threshold for a given id from the complete dataset.
-
-    Args:
-        hit_for_id (object): The hits for the respective id as dataframe.
-        thresholds (list): Lists of thresholds to to use for the selection of the top hit.
-
-    Returns:
-        object: Single line dataframe containing the top hit
-    """
-    # find the highest similarity value for the threshold
     threshold = hit_for_id["pct_identity"].max()
 
-    # check for no matches first
     if "no-match" in hit_for_id.astype(str).values:
         return 0, "no-match"
-    else:
-        # move through the taxonomy if it is no nomatch hit or broken record
-        #if threshold >= thresholds[0]:
-        #    return thresholds[0], "species"
-        #elif threshold >= thresholds[1]:
-        #    return thresholds[1], "genus"
-        #elif threshold >= thresholds[2]:
-        #    return thresholds[2], "family"
-        #elif threshold >= thresholds[3]:
-        #    return thresholds[3], "order"
-        #elif threshold >= thresholds[4]:
-        #    return thresholds[4], "class"
-        #else:
-        #    return thresholds[5], "phylum"
-        levels = ["species", "genus", "family", "order", "class", "phylum"]
 
-        # Iterate thresholds safely
-        for i, t in enumerate(thresholds):
-            if threshold >= t:
-                level = levels[i] if i < len(levels) else levels[-1]
-                return t, level
+    levels = ["species", "genus", "family", "order", "class", "phylum"]
 
-        # If no threshold matched, return the lowest one
-        last_level = levels[len(thresholds)-1] if len(thresholds) <= len(levels) else levels[-1]
-        return thresholds[-1], last_level
+    # iterate thresholds safely
+    for i, t in enumerate(thresholds):
+        if threshold >= t:
+            return t, levels[i]
+
+    # fallback: lowest level
+    return thresholds[-1], levels[-1]
 
 
 def move_threshold_up(threshold: int, thresholds: list) -> tuple:
@@ -149,62 +123,114 @@ def move_threshold_up(threshold: int, thresholds: list) -> tuple:
 
     Returns:
         tuple: (new_threshold, thresholds)
+
+    Note:
+        threshold must not already be thresholds[-1] (phylum) - there is no
+        level beyond it, so the index lookup below would raise IndexError.
+        Callers must check for that case themselves before calling this.
     """
     levels = ["species", "genus", "family", "order", "class", "phylum"]
 
     idx = thresholds.index(threshold)
 
-    # If already at last threshold, clamp to last level
+    # already at last threshold → cannot move further
     if idx >= len(thresholds) - 1:
-        level_idx = min(idx, len(levels) - 1)
-        return threshold, levels[level_idx]
+        return threshold, levels[-1]
 
-    # Move up one threshold, clamp level index
     new_idx = idx + 1
-    level_idx = min(new_idx, len(levels) - 1)
+    return thresholds[new_idx], levels[new_idx]
 
-    return thresholds[new_idx], levels[level_idx]
 
 def flag_hits(top_hits: object, final_top_hit: object):
-    # initialize the flags
     flags = [""] * 5
 
-    # flag 1: Reverse BIN taxonomy
     id_method = top_hits["identification_method"].dropna()
-
     if (
         not id_method.empty
         and id_method.str.contains("BOLD|ID|Tree|BIN", regex=True).all()
     ):
         flags[0] = "1"
 
-    # flag 2: top hit ratio < 90%
-    #if final_top_hit["records_ratio"].item() < 0.9:
-    #    flags[1] = "2"
+    # robust ratio parsing
     ratio = pd.to_numeric(final_top_hit["records_ratio"], errors="coerce").item()
     if ratio < 0.9:
         flags[1] = "2"
 
-    
-
-    # flag 3: all of the selected top hits are private
     if top_hits["status"].isin(["private"]).all():
         flags[2] = "3"
 
     if len(top_hits.index) == 1:
         flags[3] = "4"
 
-    # flag 5: top hit is represented by multiple bins
     if len(final_top_hit["BIN"].str.split("|").item()) > 1:
         flags[4] = "5"
 
-    flags = "|".join(flags)
+    return "|".join(flags)
 
-    return flags
+
+
+def build_unresolved_result(return_value: object, blank_taxonomy: bool = False) -> object:
+    """Build a single-line result for a query that could not be classified,
+    either because it is a literal 'no-match' or because none of its hits
+    were reliable enough to resolve even the lowest (phylum) level.
+
+    Args:
+        return_value (object): Single row dataframe to base the result on.
+        blank_taxonomy (bool): If True, blank out all taxonomy columns, since
+            none of them could be resolved reliably.
+
+    Returns:
+        object: Single line dataframe with the selected top hit
+    """
+    fasta_order = return_value["fasta_order"]
+    # columns to return
+    return_value = return_value[
+        [
+            "id",
+            "phylum",
+            "class",
+            "order",
+            "family",
+            "genus",
+            "species",
+            "pct_identity",
+            "status",
+        ]
+    ]
+
+    if blank_taxonomy:
+        # used for the phylum-floor fallback: the top row's raw taxonomy is not
+        # trustworthy here (that's *why* we fell through to this branch), so
+        # report the query as unclassified rather than showing a misleading value
+        levels = ["phylum", "class", "order", "family", "genus", "species"]
+        return_value[levels] = pd.NA
+
+    # fill the missing data with correct types
+    data_to_type = {
+        "records": 0,
+        "selected_level": pd.NA,
+        "BIN": pd.NA,
+        "flags": "||||",
+    }
+    for key, value in data_to_type.items():
+        return_value[key] = value
+
+    # add the fasta order back in
+    return_value["fasta_order"] = fasta_order
+
+    return_value = return_value.astype(
+        {
+            "selected_level": "string[python]",
+            "BIN": "string[python]",
+            "flags": "string[python]",
+        }
+    )
+
+    return return_value
 
 
 def find_top_hit(hits_for_id: object, thresholds: list) -> object:
-    """Function to find the top hit for a given ID.
+    """Funtion to find the top hit for a given ID.
 
     Args:
         hits_for_id (object): Dataframe with the data for a given ID
@@ -218,55 +244,9 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
 
     # if a nomatch is found, a no-match can directly be retured
     if level == "no-match":
-        return_value = hits_for_id.query("species == 'no-match'").head(1)
-        fasta_order = return_value["fasta_order"]
-        # columns to return
-        return_value = return_value[
-            [
-                "id",
-                "phylum",
-                "class",
-                "order",
-                "family",
-                "genus",
-                "species",
-                "pct_identity",
-                "status",
-            ]
-        ]
-
-        # fill the missing data with correct types
-        data_to_type = {
-            "records": 0,
-            "selected_level": pd.NA,
-            "BIN": pd.NA,
-            "flags": "||||",
-        }
-        for key, value in data_to_type.items():
-            return_value[key] = value
-
-        # add the fasta order back in
-        return_value["fasta_order"] = fasta_order
-
-        return_value = return_value.astype(
-            {
-                "selected_level": "string[python]",
-                "BIN": "string[python]",
-                "flags": "string[python]",
-            }
+        return build_unresolved_result(
+            hits_for_id.query("species == 'no-match'").head(1)
         )
-
-        return return_value
-
-    # fallback if no top hits are found
-    top_hits = hits_for_id.copy()              # fallback for top_hits
-    final_top_hit = hits_for_id.head(1).copy() # fallback for final_top_hit
-
-    # ensure required columns exist for flag_hits()
-    final_top_hit["records"] = 0
-    final_top_hit["records_ratio"] = 0.0
-    final_top_hit["selected_level"] = ""
-    final_top_hit["BIN"] = ""
 
     # go through the hits to make the selection
     while True:
@@ -297,43 +277,41 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
 
         # if there's nothing left, move the threshold up and continue to search
         if len(hits_above_similarity.index) == 0:
+            # thresholds[-1] (phylum) is a *virtual* floor: get_threshold() routes
+            # any hit weaker than the class threshold into "phylum" no matter how
+            # low its pct_identity actually is, or even if phylum itself is NA for
+            # every hit. That means this branch can still come up empty here -
+            # either the pct_identity filter above dropped every row, or the
+            # groupby/dropna on the phylum column did. Since phylum is already the
+            # last rung of `thresholds`, move_threshold_up() has nothing left to
+            # move to and would raise IndexError - so bail out to an unresolved
+            # result instead of looping further.
+            if threshold == thresholds[-1]:
+                return build_unresolved_result(
+                    hits_for_id.head(1), blank_taxonomy=True
+                )
+
             old_threshold = threshold
             threshold, level = move_threshold_up(threshold, thresholds)
 
-            # If threshold did not change, we are stuck at the last level → TRUE FAILURE
+            # NEW: failure detection
             if threshold == old_threshold:
-                FAILED_IDS.append((hits_for_id["id"].iloc[0], level))
                 print("FAILING ID:", hits_for_id["id"].iloc[0])
-                print(hits_for_id)
-
-                # mark as no-match at all taxonomy levels
-                for col in ["phylum", "class", "order", "family", "genus", "species"]:
-                    final_top_hit[col] = "no-match"
-
-                final_top_hit["records"] = 0
-                final_top_hit["records_ratio"] = 0.0
-                final_top_hit["selected_level"] = ""
-                final_top_hit["BIN"] = ""
-
-                # no valid top_hits in this case
-                top_hits = hits_for_id.head(0)
-
-                break
+                return build_unresolved_result(
+                    hits_for_id.head(1), blank_taxonomy=True
+                )
 
             continue
-
-        # sort by count
+        # sort by count            
         hits_above_similarity = hits_above_similarity.sort_values(
             by="count", ascending=False
         )
 
+
         # select the top hit and its count
-        top_hit, top_count, top_ratio = (
-            hits_above_similarity.head(1),
-            hits_above_similarity.head(1)["count"].item(),
-            hits_above_similarity.head(1)["count"].item()
-            / hits_above_similarity["count"].sum(),
-        )
+        top_hit = hits_above_similarity.head(1)
+        top_count = top_hit["count"].item()
+        top_ratio = top_count / hits_above_similarity["count"].sum()
 
         # drop all columns with na values to not pollute the query string
         top_hit = top_hit.dropna(axis=1).drop(labels="count", axis=1)
@@ -365,17 +343,17 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
 
         # add the BINs to the top hit
         final_top_hit["BIN"] = "|".join(top_hit_bins)
-        
+
+        # remove information that is higher then the selected level if neccesarry
         if threshold != thresholds[0]:
+            # get the index of the selected level
             idx = all_levels.index(level)
             levels_to_remove = all_levels[idx + 1:]
-        
             final_top_hit[levels_to_remove] = pd.NA
             final_top_hit[levels_to_remove] = final_top_hit[
                 levels_to_remove
             ].astype("string")
-            
-        # original behavior: keep taxonomy as is for successful hits
+            break
         break
 
     # add flags to the hits
@@ -403,7 +381,6 @@ def find_top_hit(hits_for_id: object, thresholds: list) -> object:
     ]
 
     return final_top_hit
-
 
 
 def gather_top_hits(
@@ -473,7 +450,6 @@ def gather_top_hits(
         
         if FAILED_IDS:
             print("FAILED IDS:", FAILED_IDS)
-
 
 
 def save_results(project_directory, fasta_name):
