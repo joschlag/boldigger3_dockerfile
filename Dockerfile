@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential
 
  RUN pip install --upgrade pip \
-    && pip install boldigger3==3.0.0 \
+    && pip install boldigger3==3.0.3 \
     && pip install "lxml[html_clean]" \
     && rm -rf /var/lib/apt/lists/*
 
